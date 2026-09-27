@@ -23,7 +23,6 @@ use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout}
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-const DEFAULT_ADDR: &str = "127.0.0.1:8763";
 const MAX_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_PARALLELISM: usize = 256;
@@ -429,7 +428,7 @@ mod tests {
 
     #[test]
     fn rejects_non_loopback_bind() {
-        assert!(parse_loopback_addr(DEFAULT_ADDR).is_ok());
+        assert!(parse_loopback_addr("127.0.0.1:8763").is_ok());
         assert!(parse_loopback_addr("0.0.0.0:8763").is_err());
     }
 
