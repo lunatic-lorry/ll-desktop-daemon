@@ -286,7 +286,7 @@ fn positive_usize_env(name: &str, default_value: usize) -> Result<usize> {
 
 fn token_path() -> Result<PathBuf> {
     if let Ok(path) = env::var("LL_DESKTOP_TOKEN_FILE") {
-        return Ok(expand_home(Path::new(&path))?);
+        return expand_home(Path::new(&path));
     }
     let home = env::var_os("HOME").ok_or_else(|| anyhow!("HOME is required"))?;
     return Ok(PathBuf::from(home).join(".lunatic-lorry/daemon/token"));
