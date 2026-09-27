@@ -17,12 +17,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{
-    io::AsyncWriteExt,
-    process::Command,
-    sync::Semaphore,
-    time::timeout,
-};
+use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
 use uuid::Uuid;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8763";
@@ -78,13 +73,17 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let addr = parse_loopback_addr(env::var("LL_DESKTOP_ADDR").as_deref().unwrap_or(DEFAULT_ADDR))?;
+    let addr = parse_loopback_addr(
+        env::var("LL_DESKTOP_ADDR")
+            .as_deref()
+            .unwrap_or(DEFAULT_ADDR),
+    )?;
     let token_path = token_path()?;
     let token = load_or_create_token(&token_path)?;
-    let worker_command = env::var("LL_WORKER_COMMAND").unwrap_or_else(|_| DEFAULT_WORKER.to_owned());
-    let worker_args = parse_args_json("LL_WORKER_ARGS_JSON")?.unwrap_or_else(|| {
-        vec!["run".to_owned(), "ll-lambda.wasm".to_owned()]
-    });
+    let worker_command =
+        env::var("LL_WORKER_COMMAND").unwrap_or_else(|_| DEFAULT_WORKER.to_owned());
+    let worker_args = parse_args_json("LL_WORKER_ARGS_JSON")?
+        .unwrap_or_else(|| vec!["run".to_owned(), "ll-lambda.wasm".to_owned()]);
     let parallelism = positive_usize_env("LL_MAX_PARALLEL_INVOCATIONS", 16)?;
 
     let state = AppState {
@@ -198,7 +197,10 @@ async fn run_fresh_worker(
         .with_context(|| format!("failed to start {}", state.worker_command))?;
 
     let payload = serde_json::to_vec(&request.payload_json)?;
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("worker stdin unavailable"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("worker stdin unavailable"))?;
     stdin.write_all(&payload).await?;
     stdin.shutdown().await?;
     drop(stdin);
@@ -209,7 +211,10 @@ async fn run_fresh_worker(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let summary = stderr.lines().next().unwrap_or("worker exited unsuccessfully");
+        let summary = stderr
+            .lines()
+            .next()
+            .unwrap_or("worker exited unsuccessfully");
         bail!("worker failed: {summary}");
     }
 
@@ -244,7 +249,9 @@ fn validate_identifier(name: &str, value: &str) -> Result<(), (StatusCode, Strin
 }
 
 fn parse_loopback_addr(value: &str) -> Result<SocketAddr> {
-    let addr: SocketAddr = value.parse().context("LL_DESKTOP_ADDR is not a socket address")?;
+    let addr: SocketAddr = value
+        .parse()
+        .context("LL_DESKTOP_ADDR is not a socket address")?;
     if !is_loopback(addr.ip()) {
         bail!("LL_DESKTOP_ADDR must bind to loopback");
     }
@@ -268,7 +275,9 @@ fn positive_usize_env(name: &str, default_value: usize) -> Result<usize> {
     let Some(raw) = env::var(name).ok() else {
         return Ok(default_value);
     };
-    let value = raw.parse::<usize>().with_context(|| format!("{name} must be an integer"))?;
+    let value = raw
+        .parse::<usize>()
+        .with_context(|| format!("{name} must be an integer"))?;
     if value == 0 {
         bail!("{name} must be greater than zero");
     }
@@ -302,7 +311,9 @@ fn load_or_create_token(path: &Path) -> Result<String> {
         bail!("desktop daemon token file is too short");
     }
 
-    let parent = path.parent().ok_or_else(|| anyhow!("token path has no parent"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("token path has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     std::fs::write(path, format!("{token}\n"))?;
