@@ -1,0 +1,48 @@
+[help]
+url = "https://github.com/lunatic-lorry/ll-desktop-daemon"
+columns = ["options", "env", "type", "default", "description"]
+
+[parse]
+stop_at_first_positional = false
+allow_unknown = false
+
+[flags.listen]
+env = "LL_DESKTOP_ADDR"
+aliases = ["listen"]
+type = "string"
+default = "127.0.0.1:8763"
+help = "Loopback listen address for the desktop daemon."
+
+[flags.runtime]
+env = "LL_RUNTIME_COMMAND"
+aliases = ["runtime"]
+type = "string"
+default = "lunatic"
+help = "Allowlisted Lunatic runtime executable owned by local desired state."
+
+[flags.worker-args-json]
+env = "LL_WORKER_ARGS_JSON"
+aliases = ["worker-args-json"]
+type = "string"
+default = "[\"run\",\"ll-lambda.wasm\"]"
+help = "JSON string array of fixed Lunatic worker arguments."
+
+[flags.max-parallel]
+env = "LL_MAX_PARALLEL_INVOCATIONS"
+aliases = ["max-parallel"]
+type = "integer"
+default = 8
+help = "Maximum concurrent one-shot WASM actor processes."
+
+[flags.token-file]
+env = "LL_DESKTOP_TOKEN_FILE"
+aliases = ["token-file"]
+type = "string"
+help = "Optional local bearer-token file path; token values are never argv."
+
+[flags.log]
+env = "LL_DESKTOP_LOG"
+aliases = ["log"]
+type = "string"
+default = "ll_desktop_daemon=info"
+help = "Tracing filter for the desktop daemon."
