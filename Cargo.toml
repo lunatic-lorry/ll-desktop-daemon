@@ -6,6 +6,7 @@ rust-version = "1.90"
 description = "Loopback desktop control plane for Lunatic Lorry"
 
 [dependencies]
+ores-common-desktop-infra = { path = "tmp/dev/ores-common-desktop-infra/infra/rust" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
