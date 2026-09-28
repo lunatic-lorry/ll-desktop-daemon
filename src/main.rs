@@ -50,13 +50,16 @@ use tokio::{
     sync::{RwLock, Semaphore},
     time::timeout,
 };
+use tower::limit::ConcurrencyLimitLayer;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 const MAX_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = MAX_MODULE_BYTES * 2;
+const MAX_DEPLOY_BODY_BYTES: usize = 96 * 1024 * 1024;
 const MAX_PARALLELISM: usize = 256;
+const MAX_PARALLEL_DEPLOYS: usize = 16;
 const MAX_INVOCATION_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ACTOR_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_COMPILED_MODULES: usize = 512;
@@ -70,6 +73,7 @@ struct CliConfig {
     LL_RUNTIME_COMMAND: String,
     LL_WORKER_ARGS_JSON: String,
     LL_MAX_PARALLEL_INVOCATIONS: i64,
+    LL_MAX_PARALLEL_DEPLOYS: i64,
     LL_DESKTOP_TOKEN_FILE: Option<String>,
     LL_DESKTOP_LOG: String,
 }
@@ -78,6 +82,7 @@ struct CliConfig {
 struct RuntimeConfig {
     addr: SocketAddr,
     parallelism: usize,
+    parallel_deploys: usize,
     token_path: PathBuf,
     artifact_root: PathBuf,
     log_filter: String,
@@ -193,6 +198,7 @@ async fn main() -> Result<()> {
     let token = load_or_create_token(&config.token_path)?;
     tokio::fs::create_dir_all(&config.artifact_root).await?;
     validate_real_directory(&config.artifact_root, "artifact root").await?;
+    let deploy_admission = ConcurrencyLimitLayer::new(config.parallel_deploys);
     let state = AppState {
         token: Arc::from(token),
         lunatic: Arc::new(LunaticHost::new()?),
@@ -208,7 +214,15 @@ async fn main() -> Result<()> {
         .route("/healthz", get(health))
         .route("/v1/status", get(status))
         .route("/v1/doctor", get(status))
-        .route("/v1/deploy", post(deploy))
+        // Bound large deployment requests before Axum buffers their JSON body
+        // and hold the admission permit through validation, compilation, and
+        // immutable publication.
+        .route(
+            "/v1/deploy",
+            post(deploy)
+                .layer::<_, std::convert::Infallible>(deploy_admission)
+                .layer(DefaultBodyLimit::max(MAX_DEPLOY_BODY_BYTES)),
+        )
         .route("/v1/invoke", post(invoke))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
@@ -264,6 +278,12 @@ fn load_config() -> Result<RuntimeConfig> {
         .ok_or_else(|| {
             anyhow!("LL_MAX_PARALLEL_INVOCATIONS must be between 1 and {MAX_PARALLELISM}")
         })?;
+    let parallel_deploys = usize::try_from(raw_config.LL_MAX_PARALLEL_DEPLOYS)
+        .ok()
+        .filter(|value| *value > 0 && *value <= MAX_PARALLEL_DEPLOYS)
+        .ok_or_else(|| {
+            anyhow!("LL_MAX_PARALLEL_DEPLOYS must be between 1 and {MAX_PARALLEL_DEPLOYS}")
+        })?;
     let token_path = match raw_config.LL_DESKTOP_TOKEN_FILE {
         Some(path) if !path.trim().is_empty() => expand_home(Path::new(&path))?,
         _ => default_token_path()?,
@@ -272,6 +292,7 @@ fn load_config() -> Result<RuntimeConfig> {
     return Ok(RuntimeConfig {
         addr,
         parallelism,
+        parallel_deploys,
         token_path,
         artifact_root: default_artifact_root()?,
         log_filter: raw_config.LL_DESKTOP_LOG,
@@ -1121,6 +1142,18 @@ mod tests {
     fn wasm_header_is_required() {
         assert!(validate_wasm_module(WASM_HEADER).is_ok());
         assert!(validate_wasm_module(b"not-wasm").is_err());
+    }
+
+    #[test]
+    fn deploy_body_limit_bounds_pre_compile_retention() {
+        let deploy_body_limit = std::hint::black_box(MAX_DEPLOY_BODY_BYTES);
+        let module_limit = std::hint::black_box(MAX_MODULE_BYTES);
+        let global_body_limit = std::hint::black_box(MAX_BODY_BYTES);
+        let deploy_parallel_limit = std::hint::black_box(MAX_PARALLEL_DEPLOYS);
+        let actor_parallel_limit = std::hint::black_box(MAX_PARALLELISM);
+        assert!(deploy_body_limit > module_limit);
+        assert!(deploy_body_limit < global_body_limit);
+        assert!(deploy_parallel_limit < actor_parallel_limit);
     }
 
     #[test]

@@ -34,6 +34,13 @@ type = "integer"
 default = 8
 help = "Maximum concurrent fresh Lunatic WASM actors inside the resident daemon runtime."
 
+[flags.max-parallel-deploys]
+env = "LL_MAX_PARALLEL_DEPLOYS"
+aliases = ["max-parallel-deploys"]
+type = "integer"
+default = 2
+help = "Maximum concurrent deployment bodies admitted for validation, compilation, and immutable publication."
+
 [flags.token-file]
 env = "LL_DESKTOP_TOKEN_FILE"
 aliases = ["token-file"]
