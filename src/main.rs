@@ -408,8 +408,12 @@ fn load_or_create_token(path: &Path) -> Result<String> {
                     bail!("desktop daemon token file permissions must be 0600 or stricter");
                 }
             }
-            let token = std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read desktop daemon token file {}", path.display()))?;
+            let token = std::fs::read_to_string(path).with_context(|| {
+                format!(
+                    "failed to read desktop daemon token file {}",
+                    path.display()
+                )
+            })?;
             let token = token.trim();
             if token.len() >= 32 && !token.chars().any(char::is_whitespace) {
                 return Ok(token.to_owned());
@@ -419,11 +423,13 @@ fn load_or_create_token(path: &Path) -> Result<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error).with_context(|| {
-                format!("failed to inspect desktop daemon token path {}", path.display())
+                format!(
+                    "failed to inspect desktop daemon token path {}",
+                    path.display()
+                )
             });
         }
     }
-
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("token path has no parent"))?;
@@ -436,9 +442,12 @@ fn load_or_create_token(path: &Path) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("failed to create desktop daemon token file {}", path.display()))?;
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "failed to create desktop daemon token file {}",
+            path.display()
+        )
+    })?;
     {
         use std::io::Write as _;
         file.write_all(format!("{token}\n").as_bytes())?;
@@ -485,8 +494,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ll-token-test-{}", Uuid::new_v4()));
         let path = root.join("token");
         std::fs::create_dir_all(&root).expect("create token test directory");
-        std::fs::write(&path, "0123456789abcdef0123456789abcdef\n")
-            .expect("write token fixture");
+        std::fs::write(&path, "0123456789abcdef0123456789abcdef\n").expect("write token fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("set token fixture permissions");
         assert!(load_or_create_token(&path).is_err());
