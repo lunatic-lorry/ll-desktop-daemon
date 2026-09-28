@@ -586,7 +586,10 @@ fn artifact_path(root: &Path, tenant_id: &str, deployment_id: &str) -> Result<Pa
 fn manifest_path(root: &Path, tenant_id: &str, deployment_id: &str) -> Result<PathBuf> {
     validate_path_component(tenant_id)?;
     validate_path_component(deployment_id)?;
-    return Ok(root.join(tenant_id).join(deployment_id).join("manifest.json"));
+    return Ok(root
+        .join(tenant_id)
+        .join(deployment_id)
+        .join("manifest.json"));
 }
 
 fn validate_path_component(value: &str) -> Result<()> {
@@ -742,7 +745,10 @@ async fn publish_immutable_manifest(
 
     if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("deployment manifest {} must be a regular file", path.display());
+            bail!(
+                "deployment manifest {} must be a regular file",
+                path.display()
+            );
         }
         let existing = tokio::fs::read(&path).await?;
         if existing == bytes {
@@ -777,7 +783,10 @@ async fn publish_immutable_manifest(
             let _ = tokio::fs::remove_file(&temporary).await;
             let metadata = tokio::fs::symlink_metadata(&path).await?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("deployment manifest {} must be a regular file", path.display());
+                bail!(
+                    "deployment manifest {} must be a regular file",
+                    path.display()
+                );
             }
             let existing = tokio::fs::read(&path).await?;
             if existing == bytes {
@@ -1013,21 +1022,19 @@ mod tests {
             ores_adapter_sha256: None,
         };
 
-        atomic_write_immutable_deployment(
-            &root,
-            "tenant-a",
-            "deploy-a",
-            &module,
-            &manifest,
-        )
-        .await?;
+        atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
+            .await?;
         assert_eq!(
             verify_deployment(&root, "tenant-a", "deploy-a").await?,
             manifest
         );
 
         tokio::fs::write(artifact_path(&root, "tenant-a", "deploy-a")?, b"tampered").await?;
-        assert!(verify_deployment(&root, "tenant-a", "deploy-a").await.is_err());
+        assert!(
+            verify_deployment(&root, "tenant-a", "deploy-a")
+                .await
+                .is_err()
+        );
 
         let _ = tokio::fs::remove_dir_all(&root).await;
         return Ok(());
@@ -1035,10 +1042,8 @@ mod tests {
 
     #[tokio::test]
     async fn deployment_manifest_requires_consistent_adapter_evidence() -> Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "ll-adapter-evidence-{}",
-            Uuid::new_v4().simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ll-adapter-evidence-{}", Uuid::new_v4().simple()));
         tokio::fs::create_dir(&root).await?;
 
         let module = WASM_HEADER.to_vec();
