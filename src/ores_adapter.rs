@@ -95,12 +95,11 @@ fn validate_source_path(value: &str) -> Result<()> {
         && !value.contains('\0')
         && !value.contains('\\')
         && !path.is_absolute()
-        && value.ends_with("lambda.rs")
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_)));
     if !valid {
-        bail!("ORES adapter source must be a normalized repository-relative lambda.rs path");
+        bail!("ORES adapter source must be a normalized repository-relative path");
     }
     return Ok(());
 }
@@ -150,6 +149,10 @@ mod tests {
         let mut adapter = valid_adapter();
         adapter.invocation_instance_reuse = "allowed".to_owned();
         assert!(adapter.validate().is_err());
+
+        let mut adapter = valid_adapter();
+        adapter.source = "generated/provider-neutral.rs".to_owned();
+        assert!(adapter.validate().is_ok());
 
         let mut adapter = valid_adapter();
         adapter.ambient_import_policy = "ambient_wasi".to_owned();
