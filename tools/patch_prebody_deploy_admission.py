@@ -60,6 +60,6 @@ replace_once(
 )
 replace_once(
     '''    #[test]\n    fn truncates_worker_errors() {''',
-    '''    #[test]\n    fn deploy_body_limit_bounds_pre_compile_retention() {\n        assert!(MAX_DEPLOY_BODY_BYTES > MAX_MODULE_BYTES);\n        assert!(MAX_DEPLOY_BODY_BYTES < MAX_BODY_BYTES);\n        assert!(MAX_PARALLEL_DEPLOYS < MAX_PARALLELISM);\n    }\n\n    #[test]\n    fn truncates_worker_errors() {''',
+    '''    #[test]\n    fn deploy_body_limit_bounds_pre_compile_retention() {\n        let deploy_body_limit = std::hint::black_box(MAX_DEPLOY_BODY_BYTES);\n        let module_limit = std::hint::black_box(MAX_MODULE_BYTES);\n        let global_body_limit = std::hint::black_box(MAX_BODY_BYTES);\n        let deploy_parallel_limit = std::hint::black_box(MAX_PARALLEL_DEPLOYS);\n        let actor_parallel_limit = std::hint::black_box(MAX_PARALLELISM);\n        assert!(deploy_body_limit > module_limit);\n        assert!(deploy_body_limit < global_body_limit);\n        assert!(deploy_parallel_limit < actor_parallel_limit);\n    }\n\n    #[test]\n    fn truncates_worker_errors() {''',
 )
 path.write_text(text)
