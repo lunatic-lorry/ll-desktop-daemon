@@ -1043,23 +1043,51 @@ fn expand_home(path: &Path) -> Result<PathBuf> {
 }
 
 fn load_or_create_token(path: &Path) -> Result<String> {
-    if let Ok(token) = std::fs::read_to_string(path) {
-        let token = token.trim();
-        if token.len() >= 32 && !token.chars().any(char::is_whitespace) {
-            return Ok(token.to_owned());
+    const MAX_TOKEN_FILE_BYTES: u64 = 4096;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("desktop daemon token path must be a regular non-symlink file");
+            }
+            if metadata.len() == 0 || metadata.len() > MAX_TOKEN_FILE_BYTES {
+                bail!("desktop daemon token file size is invalid");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if metadata.permissions().mode() & 0o077 != 0 {
+                    bail!("desktop daemon token file must have owner-only permissions (0600)");
+                }
+            }
+            let token = std::fs::read_to_string(path)?;
+            let token = token.trim();
+            if token.len() >= 32 && !token.chars().any(char::is_whitespace) {
+                return Ok(token.to_owned());
+            }
+            bail!("desktop daemon token file is malformed");
         }
-        bail!("desktop daemon token file is malformed");
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
+
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("token path has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    std::fs::write(path, format!("{token}\n"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    {
+        use std::io::Write as _;
+        file.write_all(format!("{token}\n").as_bytes())?;
+        file.sync_all()?;
     }
     return Ok(token);
 }
