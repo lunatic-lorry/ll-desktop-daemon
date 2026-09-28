@@ -5,19 +5,29 @@ on:
     branches:
       - feat/module-deploy-20260927
 
+permissions:
+  contents: write
+
 jobs:
   format:
+    if: github.event.head_commit.message != 'style: apply rustfmt'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: feat/module-deploy-20260927
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.90.0'
           components: rustfmt
       - run: cargo fmt --all
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-output
-          path: |
-            src/main.rs
-            src/ores_adapter.rs
+      - name: Commit exact rustfmt output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/ores_adapter.rs
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "style: apply rustfmt"
+          git push origin HEAD:feat/module-deploy-20260927
