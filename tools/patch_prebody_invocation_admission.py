@@ -34,7 +34,7 @@ replace_once(
 )
 replace_once(
     '''        .route("/v1/deploy", post(deploy))\n        .route("/v1/invoke", post(invoke))\n        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))''',
-    '''        .route("/v1/deploy", post(deploy))\n        // Admission wraps the invoke route before Axum's Json extractor buffers\n        // and deserializes the request body. The handler semaphore remains a\n        // second actor-execution guard; this outer limit bounds pre-execution\n        // request retention as well.\n        .route(\n            "/v1/invoke",\n            post(invoke)\n                .layer(invoke_admission)\n                .layer(DefaultBodyLimit::max(MAX_INVOCATION_BODY_BYTES)),\n        )\n        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))''',
+    '''        .route("/v1/deploy", post(deploy))\n        // Admission wraps the invoke route before Axum's Json extractor buffers\n        // and deserializes the request body. The handler semaphore remains a\n        // second actor-execution guard; this outer limit bounds pre-execution\n        // request retention as well.\n        .route(\n            "/v1/invoke",\n            post(invoke)\n                .layer::<_, std::convert::Infallible>(invoke_admission)\n                .layer(DefaultBodyLimit::max(MAX_INVOCATION_BODY_BYTES)),\n        )\n        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))''',
 )
 replace_once(
     '''    #[test]\n    fn truncates_worker_errors() {''',
