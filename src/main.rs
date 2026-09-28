@@ -50,6 +50,7 @@ use tokio::{
     sync::{RwLock, Semaphore},
     time::timeout,
 };
+use tower::limit::ConcurrencyLimitLayer;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -58,6 +59,7 @@ const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = MAX_MODULE_BYTES * 2;
 const MAX_PARALLELISM: usize = 256;
 const MAX_INVOCATION_BYTES: usize = 10 * 1024 * 1024;
+const MAX_INVOCATION_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ACTOR_OUTPUT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_COMPILED_MODULES: usize = 512;
 const ACTOR_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -193,6 +195,7 @@ async fn main() -> Result<()> {
     let token = load_or_create_token(&config.token_path)?;
     tokio::fs::create_dir_all(&config.artifact_root).await?;
     validate_real_directory(&config.artifact_root, "artifact root").await?;
+    let invoke_admission = ConcurrencyLimitLayer::new(config.parallelism);
     let state = AppState {
         token: Arc::from(token),
         lunatic: Arc::new(LunaticHost::new()?),
@@ -209,7 +212,16 @@ async fn main() -> Result<()> {
         .route("/v1/status", get(status))
         .route("/v1/doctor", get(status))
         .route("/v1/deploy", post(deploy))
-        .route("/v1/invoke", post(invoke))
+        // Admission wraps the invoke route before Axum's Json extractor buffers
+        // and deserializes the request body. The handler semaphore remains a
+        // second actor-execution guard; this outer limit bounds pre-execution
+        // request retention as well.
+        .route(
+            "/v1/invoke",
+            post(invoke)
+                .layer::<_, std::convert::Infallible>(invoke_admission)
+                .layer(DefaultBodyLimit::max(MAX_INVOCATION_BODY_BYTES)),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
 
@@ -1121,6 +1133,16 @@ mod tests {
     fn wasm_header_is_required() {
         assert!(validate_wasm_module(WASM_HEADER).is_ok());
         assert!(validate_wasm_module(b"not-wasm").is_err());
+    }
+
+    #[test]
+    fn invocation_body_limit_bounds_pre_actor_retention() {
+        let body_limit = std::hint::black_box(MAX_INVOCATION_BODY_BYTES);
+        let invocation_limit = std::hint::black_box(MAX_INVOCATION_BYTES);
+        let global_limit = std::hint::black_box(MAX_BODY_BYTES);
+        assert!(body_limit > invocation_limit);
+        assert!(body_limit < global_limit);
+        assert!(body_limit <= invocation_limit * 2);
     }
 
     #[test]
