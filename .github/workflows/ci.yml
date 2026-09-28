@@ -33,3 +33,14 @@ jobs:
       - name: Test
         shell: bash
         run: cargo +1.90.0 test --all-targets
+      - name: Check out pinned common desktop runtime
+        uses: actions/checkout@v4
+        with:
+          repository: ORESoftware/ores-common-desktop-infra
+          ref: 7720f084155c8c3c92f714873516eb119826c296
+          path: tmp/dev/ores-common-desktop-infra
+          token: ${{ secrets.FLEET_GITHUB_READ_TOKEN }}
+          persist-credentials: false
+      - name: Verify pinned common desktop runtime
+        shell: bash
+        run: test "$(git -C tmp/dev/ores-common-desktop-infra rev-parse HEAD)" = "7720f084155c8c3c92f714873516eb119826c296"
