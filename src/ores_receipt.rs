@@ -83,17 +83,33 @@ pub fn verify(
 
     let receipt: WasmArtifactReceipt = serde_json::from_slice(raw_receipt_bytes)
         .context("raw ORES receipt bytes are not valid receipt JSON")?;
-    require(&receipt.schema_version, RECEIPT_SCHEMA, "receipt schema_version")?;
+    require(
+        &receipt.schema_version,
+        RECEIPT_SCHEMA,
+        "receipt schema_version",
+    )?;
     require(&receipt.generated_by, "ores-stack", "receipt generated_by")?;
     require(&receipt.provider, PROVIDER, "receipt provider")?;
-    require(&receipt.target_triple, TARGET_TRIPLE, "receipt target_triple")?;
-    require(&receipt.adapter_contract, ADAPTER_SCHEMA, "receipt adapter_contract")?;
+    require(
+        &receipt.target_triple,
+        TARGET_TRIPLE,
+        "receipt target_triple",
+    )?;
+    require(
+        &receipt.adapter_contract,
+        ADAPTER_SCHEMA,
+        "receipt adapter_contract",
+    )?;
     if receipt.deploy_mutation_performed {
         bail!("ORES WASM artifact receipt must remain immutable build evidence");
     }
 
     let provenance = raw_adapter.deployment_provenance()?;
-    require(&receipt.source_path, &provenance.source, "receipt source_path")?;
+    require(
+        &receipt.source_path,
+        &provenance.source,
+        "receipt source_path",
+    )?;
     require(
         &receipt.source_sha256,
         &provenance.source_sha256,
@@ -128,7 +144,10 @@ pub fn verify(
         ("adapter_sha256", receipt.adapter_sha256.as_str()),
         ("source_sha256", receipt.source_sha256.as_str()),
         ("wrapper_sha256", receipt.wrapper_sha256.as_str()),
-        ("unit_manifest_sha256", receipt.unit_manifest_sha256.as_str()),
+        (
+            "unit_manifest_sha256",
+            receipt.unit_manifest_sha256.as_str(),
+        ),
     ] {
         validate_sha256(digest, label)?;
     }

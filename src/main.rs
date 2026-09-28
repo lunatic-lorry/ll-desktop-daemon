@@ -1,5 +1,6 @@
 mod deployment_manifest;
 mod ores_adapter;
+mod ores_receipt;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use axum::{
@@ -109,6 +110,10 @@ struct DeployRequest {
     wasm_base64: String,
     #[serde(default)]
     ores_adapter: Option<OresLambdaAdapterV1>,
+    #[serde(default)]
+    ores_adapter_raw_base64: Option<String>,
+    #[serde(default)]
+    ores_receipt_raw_base64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +123,7 @@ struct DeployResponse {
     sha256: String,
     module_bytes: usize,
     ores_adapter_verified: bool,
+    ores_receipt_verified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,6 +302,44 @@ async fn deploy(
         )
     })?;
     validate_wasm_module(&bytes)?;
+    let ores_build_evidence = match (
+        request.ores_adapter.as_ref(),
+        request.ores_adapter_raw_base64.as_deref(),
+        request.ores_receipt_raw_base64.as_deref(),
+    ) {
+        (Some(adapter), Some(raw_adapter), Some(raw_receipt)) => {
+            let raw_adapter = BASE64.decode(raw_adapter.as_bytes()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "ores_adapter_raw_base64 is not valid base64".to_owned(),
+                )
+            })?;
+            let raw_receipt = BASE64.decode(raw_receipt.as_bytes()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "ores_receipt_raw_base64 is not valid base64".to_owned(),
+                )
+            })?;
+            Some(
+                ores_receipt::verify(adapter, &raw_adapter, &raw_receipt, &bytes).map_err(
+                    |error| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("ORES WASM receipt validation failed: {error}"),
+                        )
+                    },
+                )?,
+            )
+        }
+        (_, None, None) => None,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "ORES receipt evidence requires ores_adapter plus exact raw adapter and receipt bytes"
+                    .to_owned(),
+            ));
+        }
+    };
     state
         .lunatic
         .compile_and_cache(&bytes)
@@ -306,11 +350,12 @@ async fn deploy(
                 format!("Lunatic module compilation failed: {error}"),
             )
         })?;
-    let manifest = DeploymentManifest::new(
+    let manifest = DeploymentManifest::new_with_evidence(
         &request.tenant_id,
         &request.deployment_id,
         &bytes,
         ores_provenance,
+        ores_build_evidence.clone(),
     )
     .map_err(internal_error)?;
 
@@ -331,6 +376,7 @@ async fn deploy(
         sha256,
         module_bytes: bytes.len(),
         ores_adapter_verified: manifest.ores_adapter_verified,
+        ores_receipt_verified: ores_build_evidence.is_some(),
     }));
 }
 

@@ -5,7 +5,7 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::ores_adapter::OresDeploymentProvenance;
+use crate::{ores_adapter::OresDeploymentProvenance, ores_receipt::OresBuildEvidence};
 
 pub const DEPLOYMENT_MANIFEST_SCHEMA: &str = "lunatic-lorry.deployment/v1";
 const MANIFEST_FILE: &str = "deployment.json";
@@ -22,6 +22,8 @@ pub struct DeploymentManifest {
     pub ores_adapter_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ores_provenance: Option<OresDeploymentProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ores_build_evidence: Option<OresBuildEvidence>,
 }
 
 impl DeploymentManifest {
@@ -31,6 +33,16 @@ impl DeploymentManifest {
         module: &[u8],
         ores_provenance: Option<OresDeploymentProvenance>,
     ) -> Result<Self> {
+        return Self::new_with_evidence(tenant_id, deployment_id, module, ores_provenance, None);
+    }
+
+    pub fn new_with_evidence(
+        tenant_id: &str,
+        deployment_id: &str,
+        module: &[u8],
+        ores_provenance: Option<OresDeploymentProvenance>,
+        ores_build_evidence: Option<OresBuildEvidence>,
+    ) -> Result<Self> {
         let manifest = Self {
             schema_version: DEPLOYMENT_MANIFEST_SCHEMA.to_owned(),
             tenant_id: tenant_id.to_owned(),
@@ -39,6 +51,7 @@ impl DeploymentManifest {
             module_bytes: module.len() as u64,
             ores_adapter_verified: ores_provenance.is_some(),
             ores_provenance,
+            ores_build_evidence,
         };
         manifest.validate(tenant_id, deployment_id)?;
         return Ok(manifest);
@@ -64,6 +77,15 @@ impl DeploymentManifest {
                 bail!("deployment evidence cannot claim ORES verification without provenance");
             }
             (None, false) => {}
+        }
+        if let Some(evidence) = self.ores_build_evidence.as_ref() {
+            evidence.validate()?;
+            if !self.ores_adapter_verified || self.ores_provenance.is_none() {
+                bail!("ORES build evidence requires verified adapter provenance");
+            }
+            if evidence.artifact_sha256 != self.module_sha256 {
+                bail!("ORES build evidence artifact digest does not match module manifest");
+            }
         }
         return Ok(());
     }
