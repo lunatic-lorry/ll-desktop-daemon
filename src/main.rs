@@ -1,3 +1,4 @@
+mod lambda_import_policy;
 mod ores_adapter;
 mod ores_receipt;
 
@@ -646,6 +647,12 @@ fn validate_wasm_module(bytes: &[u8]) -> Result<(), (StatusCode, String)> {
             format!("module exceeds {MAX_MODULE_BYTES} bytes"),
         ));
     }
+    lambda_import_policy::validate_lunatic_lambda_imports(bytes).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Lunatic Lambda import admission failed: {error}"),
+        )
+    })?;
     return Ok(());
 }
 
