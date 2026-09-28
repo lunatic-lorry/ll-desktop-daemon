@@ -24,7 +24,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    sync::Semaphore,
+    time::timeout,
+};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -32,6 +37,9 @@ const MAX_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = MAX_MODULE_BYTES * 2;
 const MAX_PARALLELISM: usize = 256;
+const MAX_INVOCATION_BYTES: usize = 10 * 1024 * 1024;
+const MAX_WORKER_STDOUT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_WORKER_STDERR_BYTES: usize = 64 * 1024;
 const WASM_HEADER: &[u8; 8] = b"\0asm\x01\0\0\0";
 
 #[allow(non_snake_case)]
@@ -392,6 +400,11 @@ async fn run_fresh_worker(
         worker_args.push(module_text.to_owned());
     }
 
+    let payload = serde_json::to_vec(&request.payload_json)?;
+    if payload.len() > MAX_INVOCATION_BYTES {
+        bail!("invocation payload exceeds {MAX_INVOCATION_BYTES} bytes");
+    }
+
     let mut child = Command::new(state.worker_command.as_ref())
         .args(worker_args)
         .env("LL_TENANT_ID", &request.tenant_id)
@@ -403,7 +416,6 @@ async fn run_fresh_worker(
         .spawn()
         .with_context(|| format!("failed to start {}", state.worker_command))?;
 
-    let payload = serde_json::to_vec(&request.payload_json)?;
     let mut stdin = child
         .stdin
         .take()
@@ -412,12 +424,28 @@ async fn run_fresh_worker(
     stdin.shutdown().await?;
     drop(stdin);
 
-    let output = timeout(deadline, child.wait_with_output())
-        .await
-        .map_err(|_| anyhow!("invocation timed out; fresh WASM worker was terminated"))??;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("worker stdout unavailable"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("worker stderr unavailable"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let (status, stdout, stderr) = timeout(deadline, async {
+        let (status, stdout, stderr) = tokio::join!(
+            child.wait(),
+            read_bounded(&mut stdout, MAX_WORKER_STDOUT_BYTES, "stdout"),
+            read_bounded(&mut stderr, MAX_WORKER_STDERR_BYTES, "stderr"),
+        );
+        return Ok::<_, anyhow::Error>((status?, stdout?, stderr?));
+    })
+    .await
+    .map_err(|_| anyhow!("invocation timed out; fresh WASM worker was terminated"))??;
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         let summary = stderr
             .lines()
             .find(|line| !line.trim().is_empty())
@@ -425,9 +453,26 @@ async fn run_fresh_worker(
         bail!("worker failed: {}", truncate(summary, 512));
     }
 
-    let stdout = String::from_utf8(output.stdout).context("worker stdout was not UTF-8")?;
+    let stdout = String::from_utf8(stdout).context("worker stdout was not UTF-8")?;
     let payload_json = serde_json::from_str(stdout.trim()).context("worker stdout was not JSON")?;
     return Ok(payload_json);
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take(limit as u64 + 1);
+    limited
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("could not read worker {label}"))?;
+    if bytes.len() > limit {
+        bail!("worker {label} exceeds {limit} bytes");
+    }
+    return Ok(bytes);
 }
 
 fn validate_wasm_module(bytes: &[u8]) -> Result<(), (StatusCode, String)> {
@@ -733,6 +778,28 @@ mod tests {
     fn wasm_header_is_required() {
         assert!(validate_wasm_module(WASM_HEADER).is_ok());
         assert!(validate_wasm_module(b"not-wasm").is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_rejects_one_byte_over_limit() {
+        let mut exact = std::io::Cursor::new(vec![1_u8; 8]);
+        assert_eq!(
+            read_bounded(&mut exact, 8, "test")
+                .await
+                .expect("exact limit")
+                .len(),
+            8
+        );
+
+        let mut oversized = std::io::Cursor::new(vec![1_u8; 9]);
+        assert!(read_bounded(&mut oversized, 8, "test").await.is_err());
+    }
+
+    #[test]
+    fn invocation_and_worker_output_limits_match_lambda_runtime() {
+        assert_eq!(MAX_INVOCATION_BYTES, 10 * 1024 * 1024);
+        assert_eq!(MAX_WORKER_STDOUT_BYTES, MAX_INVOCATION_BYTES);
+        assert!(MAX_WORKER_STDERR_BYTES < MAX_WORKER_STDOUT_BYTES);
     }
 
     #[test]
