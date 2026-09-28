@@ -847,22 +847,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn embedded_runtime_compiles_minimal_wasm_without_os_process() {
-        let host = LunaticHost::new().expect("embedded runtime");
+    async fn embedded_runtime_compiles_minimal_wasm_without_os_process() -> Result<()> {
+        let host = LunaticHost::new()?;
         let wasm = wat::parse_str(
             r#"(module
                 (func (export "_start"))
             )"#,
-        )
-        .expect("WAT");
-        let first = host
-            .compile_and_cache(&wasm)
-            .await
-            .expect("compile minimal module");
-        let second = host
-            .compile_and_cache(&wasm)
-            .await
-            .expect("reuse compiled module");
+        )?;
+        let first = host.compile_and_cache(&wasm).await?;
+        let second = host.compile_and_cache(&wasm).await?;
         assert!(Arc::ptr_eq(&first, &second));
+        return Ok(());
     }
 }
