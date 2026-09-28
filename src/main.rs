@@ -1137,9 +1137,12 @@ mod tests {
 
     #[test]
     fn invocation_body_limit_bounds_pre_actor_retention() {
-        assert!(MAX_INVOCATION_BODY_BYTES > MAX_INVOCATION_BYTES);
-        assert!(MAX_INVOCATION_BODY_BYTES < MAX_BODY_BYTES);
-        assert!(MAX_INVOCATION_BODY_BYTES <= MAX_INVOCATION_BYTES * 2);
+        let body_limit = std::hint::black_box(MAX_INVOCATION_BODY_BYTES);
+        let invocation_limit = std::hint::black_box(MAX_INVOCATION_BYTES);
+        let global_limit = std::hint::black_box(MAX_BODY_BYTES);
+        assert!(body_limit > invocation_limit);
+        assert!(body_limit < global_limit);
+        assert!(body_limit <= invocation_limit * 2);
     }
 
     #[test]
