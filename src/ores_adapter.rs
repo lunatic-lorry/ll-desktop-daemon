@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 
 pub const ORES_LAMBDA_ADAPTER_SCHEMA: &str = "ores.lambda.adapter/v1";
@@ -80,6 +81,36 @@ impl OresLambdaAdapterV1 {
         validate_sha256(&self.source_sha256)?;
         return Ok(());
     }
+
+    pub fn semantic_sha256(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(self)?;
+        return Ok(format!("{:x}", Sha256::digest(bytes)));
+    }
+
+    pub fn source(&self) -> &str {
+        return &self.source;
+    }
+
+    pub fn source_sha256(&self) -> &str {
+        return &self.source_sha256;
+    }
+}
+
+pub fn validate_persisted_provenance(
+    adapter_sha256: &str,
+    source: Option<&str>,
+    source_sha256: Option<&str>,
+) -> Result<()> {
+    validate_sha256(adapter_sha256)?;
+    match (source, source_sha256) {
+        (None, None) => {} // legacy manifest emitted before source provenance was persisted
+        (Some(source), Some(source_sha256)) => {
+            validate_source_path(source)?;
+            validate_sha256(source_sha256)?;
+        }
+        _ => bail!("ORES persisted source provenance must be complete or absent"),
+    }
+    return Ok(());
 }
 
 fn require_eq(name: &str, actual: &str, expected: &str) -> Result<()> {
@@ -142,6 +173,22 @@ mod tests {
     #[test]
     fn exact_current_ores_adapter_is_admitted() -> Result<()> {
         return valid_adapter().validate();
+    }
+
+    #[test]
+    fn persisted_provenance_accepts_legacy_or_complete_evidence() -> Result<()> {
+        let adapter = valid_adapter();
+        let adapter_sha256 = adapter.semantic_sha256()?;
+        validate_persisted_provenance(&adapter_sha256, None, None)?;
+        validate_persisted_provenance(
+            &adapter_sha256,
+            Some(adapter.source()),
+            Some(adapter.source_sha256()),
+        )?;
+        assert!(
+            validate_persisted_provenance(&adapter_sha256, Some(adapter.source()), None).is_err()
+        );
+        return Ok(());
     }
 
     #[test]

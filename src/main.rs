@@ -24,6 +24,7 @@ use lunatic_stdout_capture::StdoutCapture;
 use lunatic_wasi_api::LunaticWasiCtx;
 use ores_adapter::{
     LL_EXECUTION_BOUNDARY, LL_ISOLATION_MODEL, LL_RUNTIME_CONTRACT, OresLambdaAdapterV1,
+    validate_persisted_provenance,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -132,6 +133,10 @@ struct DeploymentManifest {
     isolation_model: String,
     ores_adapter_verified: bool,
     ores_adapter_sha256: Option<String>,
+    #[serde(default)]
+    ores_source: Option<String>,
+    #[serde(default)]
+    ores_source_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,19 +298,25 @@ async fn deploy(
     validate_identifier("tenant_id", &request.tenant_id)?;
     validate_identifier("deployment_id", &request.deployment_id)?;
 
-    let (ores_adapter_verified, ores_adapter_sha256) = match request.ores_adapter.as_ref() {
-        Some(adapter) => {
-            adapter.validate().map_err(|error| {
+    let (ores_adapter_verified, ores_adapter_sha256, ores_source, ores_source_sha256) =
+        match request.ores_adapter.as_ref() {
+            Some(adapter) => {
+                adapter.validate().map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("ORES adapter validation failed: {error}"),
+                    )
+                })?;
+                let adapter_sha256 = adapter.semantic_sha256().map_err(internal_error)?;
                 (
-                    StatusCode::BAD_REQUEST,
-                    format!("ORES adapter validation failed: {error}"),
+                    true,
+                    Some(adapter_sha256),
+                    Some(adapter.source().to_owned()),
+                    Some(adapter.source_sha256().to_owned()),
                 )
-            })?;
-            let canonical = serde_json::to_vec(adapter).map_err(internal_error)?;
-            (true, Some(format!("{:x}", Sha256::digest(&canonical))))
-        }
-        None => (false, None),
-    };
+            }
+            None => (false, None, None, None),
+        };
 
     let bytes = BASE64.decode(request.wasm_base64.as_bytes()).map_err(|_| {
         (
@@ -337,6 +348,8 @@ async fn deploy(
         isolation_model: LL_ISOLATION_MODEL.to_owned(),
         ores_adapter_verified,
         ores_adapter_sha256,
+        ores_source,
+        ores_source_sha256,
     };
     atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
@@ -801,6 +814,21 @@ async fn publish_immutable_manifest(
     }
 }
 
+fn validate_manifest_ores_provenance(manifest: &DeploymentManifest) -> Result<()> {
+    match (
+        manifest.ores_adapter_verified,
+        manifest.ores_adapter_sha256.as_deref(),
+        manifest.ores_source.as_deref(),
+        manifest.ores_source_sha256.as_deref(),
+    ) {
+        (false, None, None, None) => return Ok(()),
+        (true, Some(adapter_sha256), source, source_sha256) => {
+            return validate_persisted_provenance(adapter_sha256, source, source_sha256);
+        }
+        _ => bail!("deployment manifest contains inconsistent ORES provenance evidence"),
+    }
+}
+
 async fn verify_deployment(
     root: &Path,
     tenant_id: &str,
@@ -834,10 +862,11 @@ async fn verify_deployment(
         || manifest.runtime_contract != LL_RUNTIME_CONTRACT
         || manifest.execution_boundary != LL_EXECUTION_BOUNDARY
         || manifest.isolation_model != LL_ISOLATION_MODEL
-        || manifest.ores_adapter_verified != manifest.ores_adapter_sha256.is_some()
     {
         bail!("deployment manifest does not match the Lunatic runtime contract");
     }
+
+    validate_manifest_ores_provenance(&manifest)?;
 
     let module = tokio::fs::read(&module_path).await?;
     if u64::try_from(module.len())? != manifest.module_bytes {
@@ -1020,6 +1049,8 @@ mod tests {
             isolation_model: LL_ISOLATION_MODEL.to_owned(),
             ores_adapter_verified: false,
             ores_adapter_sha256: None,
+            ores_source: None,
+            ores_source_sha256: None,
         };
 
         atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
@@ -1037,6 +1068,33 @@ mod tests {
         );
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+        return Ok(());
+    }
+
+    #[test]
+    fn manifest_provenance_accepts_legacy_and_complete_evidence() -> Result<()> {
+        let mut manifest = DeploymentManifest {
+            schema_version: "lunatic-lorry.deployment/v1".to_owned(),
+            tenant_id: "tenant-a".to_owned(),
+            deployment_id: "deploy-a".to_owned(),
+            module_sha256: "a".repeat(64),
+            module_bytes: 8,
+            runtime_contract: LL_RUNTIME_CONTRACT.to_owned(),
+            execution_boundary: LL_EXECUTION_BOUNDARY.to_owned(),
+            isolation_model: LL_ISOLATION_MODEL.to_owned(),
+            ores_adapter_verified: true,
+            ores_adapter_sha256: Some("b".repeat(64)),
+            ores_source: None,
+            ores_source_sha256: None,
+        };
+        validate_manifest_ores_provenance(&manifest)?;
+
+        manifest.ores_source = Some("src/routes/echo/lambda.rs".to_owned());
+        manifest.ores_source_sha256 = Some("c".repeat(64));
+        validate_manifest_ores_provenance(&manifest)?;
+
+        manifest.ores_source_sha256 = None;
+        assert!(validate_manifest_ores_provenance(&manifest).is_err());
         return Ok(());
     }
 
@@ -1058,6 +1116,8 @@ mod tests {
             isolation_model: LL_ISOLATION_MODEL.to_owned(),
             ores_adapter_verified: false,
             ores_adapter_sha256: Some("a".repeat(64)),
+            ores_source: Some("src/routes/echo/lambda.rs".to_owned()),
+            ores_source_sha256: Some("b".repeat(64)),
         };
 
         atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
