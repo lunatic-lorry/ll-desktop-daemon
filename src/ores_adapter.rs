@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
 pub const ORES_LAMBDA_ADAPTER_SCHEMA: &str = "ores.lambda.adapter/v1";
@@ -15,7 +15,7 @@ pub const LL_INSTANCE_REUSE: &str = "forbidden";
 pub const LL_AMBIENT_IMPORT_POLICY: &str = "explicit_lunatic_capabilities_only";
 pub const LL_DURABLE_STATE: &str = "external_only";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OresLambdaAdapterV1 {
     schema_version: String,
