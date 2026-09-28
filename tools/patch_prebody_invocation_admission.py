@@ -11,12 +11,14 @@ cargo.write_text(cargo_text.replace(needle, replacement, 1))
 path = Path("src/main.rs")
 text = path.read_text()
 
+
 def replace_once(old: str, new: str) -> None:
     global text
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"expected exactly one match, found {count}: {old[:120]!r}")
     text = text.replace(old, new, 1)
+
 
 replace_once(
     'use tracing_subscriber::EnvFilter;\n',
@@ -35,7 +37,7 @@ replace_once(
     '''        .route("/v1/deploy", post(deploy))\n        // Admission wraps the invoke route before Axum's Json extractor buffers\n        // and deserializes the request body. The handler semaphore remains a\n        // second actor-execution guard; this outer limit bounds pre-execution\n        // request retention as well.\n        .route(\n            "/v1/invoke",\n            post(invoke)\n                .layer(invoke_admission)\n                .layer(DefaultBodyLimit::max(MAX_INVOCATION_BODY_BYTES)),\n        )\n        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))''',
 )
 replace_once(
-    '''    #[test]\n    fn truncate_is_bounded() {''',
-    '''    #[test]\n    fn invocation_body_limit_bounds_pre_actor_retention() {\n        assert!(MAX_INVOCATION_BODY_BYTES > MAX_INVOCATION_BYTES);\n        assert!(MAX_INVOCATION_BODY_BYTES < MAX_BODY_BYTES);\n        assert!(MAX_INVOCATION_BODY_BYTES <= MAX_INVOCATION_BYTES * 2);\n    }\n\n    #[test]\n    fn truncate_is_bounded() {''',
+    '''    #[test]\n    fn truncates_worker_errors() {''',
+    '''    #[test]\n    fn invocation_body_limit_bounds_pre_actor_retention() {\n        assert!(MAX_INVOCATION_BODY_BYTES > MAX_INVOCATION_BYTES);\n        assert!(MAX_INVOCATION_BODY_BYTES < MAX_BODY_BYTES);\n        assert!(MAX_INVOCATION_BODY_BYTES <= MAX_INVOCATION_BYTES * 2);\n    }\n\n    #[test]\n    fn truncates_worker_errors() {''',
 )
 path.write_text(text)
