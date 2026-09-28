@@ -269,14 +269,12 @@ async fn deploy(
         None => false,
     };
 
-    let bytes = BASE64
-        .decode(request.wasm_base64.as_bytes())
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "wasm_base64 is not valid base64".to_owned(),
-            )
-        })?;
+    let bytes = BASE64.decode(request.wasm_base64.as_bytes()).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "wasm_base64 is not valid base64".to_owned(),
+        )
+    })?;
     validate_wasm_module(&bytes)?;
 
     let path = artifact_path(
@@ -363,7 +361,10 @@ async fn run_fresh_worker(
         .await
         .with_context(|| format!("deployment module {} is unavailable", module_path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("deployment module {} must be a regular file", module_path.display());
+        bail!(
+            "deployment module {} must be a regular file",
+            module_path.display()
+        );
     }
     let module_text = module_path
         .to_str()
