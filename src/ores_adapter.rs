@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 
 pub const ORES_LAMBDA_ADAPTER_SCHEMA: &str = "ores.lambda.adapter/v1";
@@ -15,7 +16,7 @@ pub const LL_INSTANCE_REUSE: &str = "forbidden";
 pub const LL_AMBIENT_IMPORT_POLICY: &str = "explicit_lunatic_capabilities_only";
 pub const LL_DURABLE_STATE: &str = "external_only";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OresLambdaAdapterV1 {
     schema_version: String,
@@ -32,6 +33,23 @@ pub struct OresLambdaAdapterV1 {
     durable_state: String,
     source: String,
     source_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OresDeploymentProvenance {
+    pub adapter_sha256: String,
+    pub source: String,
+    pub source_sha256: String,
+}
+
+impl OresDeploymentProvenance {
+    pub fn validate(&self) -> Result<()> {
+        validate_sha256(&self.adapter_sha256)?;
+        validate_source_path(&self.source)?;
+        validate_sha256(&self.source_sha256)?;
+        return Ok(());
+    }
 }
 
 impl OresLambdaAdapterV1 {
@@ -80,6 +98,22 @@ impl OresLambdaAdapterV1 {
         validate_sha256(&self.source_sha256)?;
         return Ok(());
     }
+
+    pub fn semantic_sha256(&self) -> Result<String> {
+        let bytes = serde_json::to_vec(self)?;
+        return Ok(format!("{:x}", Sha256::digest(bytes)));
+    }
+
+    pub fn deployment_provenance(&self) -> Result<OresDeploymentProvenance> {
+        self.validate()?;
+        let provenance = OresDeploymentProvenance {
+            adapter_sha256: self.semantic_sha256()?,
+            source: self.source.clone(),
+            source_sha256: self.source_sha256.clone(),
+        };
+        provenance.validate()?;
+        return Ok(provenance);
+    }
 }
 
 fn require_eq(name: &str, actual: &str, expected: &str) -> Result<()> {
@@ -110,7 +144,7 @@ fn validate_sha256(value: &str) -> Result<()> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
     if !valid {
-        bail!("ORES adapter source_sha256 must be 64 lowercase hexadecimal characters");
+        bail!("ORES SHA-256 values must be 64 lowercase hexadecimal characters");
     }
     return Ok(());
 }
@@ -142,6 +176,20 @@ mod tests {
     #[test]
     fn exact_current_ores_adapter_is_admitted() -> Result<()> {
         return valid_adapter().validate();
+    }
+
+    #[test]
+    fn deployment_provenance_binds_semantic_adapter_and_source() -> Result<()> {
+        let adapter = valid_adapter();
+        let provenance = adapter.deployment_provenance()?;
+        provenance.validate()?;
+        assert_eq!(provenance.adapter_sha256, adapter.semantic_sha256()?);
+        assert_eq!(provenance.source, "src/routes/echo/lambda.rs");
+        assert_eq!(
+            provenance.source_sha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        return Ok(());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod deployment_manifest;
 mod ores_adapter;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -8,6 +9,9 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use deployment_manifest::{
+    DeploymentManifest, verify_existing_or_legacy, verify_persisted_module_if_present, write_new,
+};
 use flags2env::BundledFlags2Env;
 use lunatic_process::{
     Signal,
@@ -275,17 +279,14 @@ async fn deploy(
     validate_identifier("tenant_id", &request.tenant_id)?;
     validate_identifier("deployment_id", &request.deployment_id)?;
 
-    let ores_adapter_verified = match request.ores_adapter.as_ref() {
-        Some(adapter) => {
-            adapter.validate().map_err(|error| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("ORES adapter validation failed: {error}"),
-                )
-            })?;
-            true
-        }
-        None => false,
+    let ores_provenance = match request.ores_adapter.as_ref() {
+        Some(adapter) => Some(adapter.deployment_provenance().map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("ORES adapter validation failed: {error}"),
+            )
+        })?),
+        None => None,
     };
 
     let bytes = BASE64.decode(request.wasm_base64.as_bytes()).map_err(|_| {
@@ -305,12 +306,20 @@ async fn deploy(
                 format!("Lunatic module compilation failed: {error}"),
             )
         })?;
+    let manifest = DeploymentManifest::new(
+        &request.tenant_id,
+        &request.deployment_id,
+        &bytes,
+        ores_provenance,
+    )
+    .map_err(internal_error)?;
 
     atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
         &request.tenant_id,
         &request.deployment_id,
         &bytes,
+        &manifest,
     )
     .await
     .map_err(internal_error)?;
@@ -321,7 +330,7 @@ async fn deploy(
         deployment_id: request.deployment_id,
         sha256,
         module_bytes: bytes.len(),
-        ores_adapter_verified,
+        ores_adapter_verified: manifest.ores_adapter_verified,
     }));
 }
 
@@ -488,7 +497,7 @@ async fn run_fresh_worker(
     request: &InvocationRequest,
     deadline: Duration,
 ) -> Result<Value> {
-    validate_deployment_directory(
+    let deployment = validate_deployment_directory(
         state.artifact_root.as_ref(),
         &request.tenant_id,
         &request.deployment_id,
@@ -514,6 +523,13 @@ async fn run_fresh_worker(
         .await
         .with_context(|| format!("could not read {}", module_path.display()))?;
     validate_wasm_module(&module_bytes).map_err(|(_, message)| anyhow!(message))?;
+    verify_persisted_module_if_present(
+        &deployment,
+        &request.tenant_id,
+        &request.deployment_id,
+        &module_bytes,
+    )
+    .await?;
     let module = state.lunatic.compile_and_cache(&module_bytes).await?;
 
     let payload = serde_json::to_vec(&request.payload_json)?;
@@ -625,6 +641,7 @@ async fn atomic_write_immutable_deployment(
     tenant_id: &str,
     deployment_id: &str,
     bytes: &[u8],
+    manifest: &DeploymentManifest,
 ) -> Result<()> {
     let deployment = validate_deployment_directory(root, tenant_id, deployment_id, true).await?;
     let path = deployment.join("module.wasm");
@@ -637,6 +654,7 @@ async fn atomic_write_immutable_deployment(
         }
         let existing = tokio::fs::read(&path).await?;
         if existing == bytes {
+            verify_existing_or_legacy(&deployment, manifest, bytes).await?;
             return Ok(());
         }
         bail!("deployment id already exists with different module bytes");
@@ -663,6 +681,10 @@ async fn atomic_write_immutable_deployment(
     match tokio::fs::hard_link(&temporary, &path).await {
         Ok(()) => {
             tokio::fs::remove_file(&temporary).await?;
+            if let Err(error) = write_new(&deployment, manifest).await {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(error).context("could not persist immutable deployment evidence");
+            }
             return Ok(());
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -676,6 +698,7 @@ async fn atomic_write_immutable_deployment(
             }
             let existing = tokio::fs::read(&path).await?;
             if existing == bytes {
+                verify_existing_or_legacy(&deployment, manifest, bytes).await?;
                 return Ok(());
             }
             bail!("deployment id already exists with different module bytes");
