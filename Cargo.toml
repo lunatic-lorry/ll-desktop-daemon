@@ -10,10 +10,6 @@ anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
 flags2env = { git = "https://github.com/flags-2-env/flags-2-env.git", rev = "8c8465561075a8d7ebb58074b3a8087138e97d8f" }
-ores-common-desktop-auth = { git = "https://github.com/ORESoftware/ores-common-desktop-infra.git", rev = "0fe05c9a62622564b43354c06612815e50241650" }
-ores-common-desktop-router = { git = "https://github.com/ORESoftware/ores-common-desktop-infra.git", rev = "0fe05c9a62622564b43354c06612815e50241650" }
-ores-common-desktop-runtime = { git = "https://github.com/ORESoftware/ores-common-desktop-infra.git", rev = "0fe05c9a62622564b43354c06612815e50241650" }
-ores-common-desktop-state = { git = "https://github.com/ORESoftware/ores-common-desktop-infra.git", rev = "0fe05c9a62622564b43354c06612815e50241650" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -21,9 +17,6 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
-
-[dev-dependencies]
-ores-common-desktop-conformance = { git = "https://github.com/ORESoftware/ores-common-desktop-infra.git", rev = "0fe05c9a62622564b43354c06612815e50241650" }
 
 [lints.rust]
 unsafe_code = "deny"
