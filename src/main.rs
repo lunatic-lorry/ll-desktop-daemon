@@ -840,8 +840,10 @@ mod tests {
     #[test]
     fn subprocess_worker_escape_hatch_is_gone() {
         let source = include_str!("main.rs");
-        assert!(!source.contains("process::Command"));
-        assert!(!source.contains("Command::new"));
+        let process_command = ["process", "::", "Command"].concat();
+        let command_new = ["Command", "::", "new"].concat();
+        assert!(!source.contains(&process_command));
+        assert!(!source.contains(&command_new));
         assert!(source.contains("spawn_wasm"));
         assert!(source.contains("embedded_fresh_lunatic_actor"));
     }
