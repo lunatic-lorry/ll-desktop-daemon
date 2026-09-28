@@ -10,6 +10,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flags2env::BundledFlags2Env;
 use lunatic_process::{
+    Signal,
     env::{Environment, LunaticEnvironment},
     message::{DataMessage, Message},
     runtimes::{
@@ -17,7 +18,6 @@ use lunatic_process::{
         wasmtime::{WasmtimeCompiledModule, WasmtimeRuntime, default_config},
     },
     wasm::spawn_wasm,
-    Signal,
 };
 use lunatic_runtime::{DefaultProcessConfig, DefaultProcessState};
 use lunatic_stdout_capture::StdoutCapture;
@@ -525,8 +525,7 @@ async fn run_fresh_worker(
     }
     let output = state.lunatic.invoke(module, payload, deadline).await?;
     let stdout = String::from_utf8(output).context("actor stdout was not UTF-8")?;
-    let payload_json =
-        serde_json::from_str(stdout.trim()).context("actor stdout was not JSON")?;
+    let payload_json = serde_json::from_str(stdout.trim()).context("actor stdout was not JSON")?;
     Ok(payload_json)
 }
 
