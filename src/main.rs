@@ -481,7 +481,8 @@ async fn ensure_real_directory(path: &Path, label: &str) -> Result<()> {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
-            return Err(error).with_context(|| format!("could not create {label} {}", path.display()));
+            return Err(error)
+                .with_context(|| format!("could not create {label} {}", path.display()));
         }
     }
     return validate_real_directory(path, label).await;
@@ -533,7 +534,10 @@ async fn atomic_write_immutable_deployment(
     let path = deployment.join("module.wasm");
     if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("deployment module {} must be a regular file", path.display());
+            bail!(
+                "deployment module {} must be a regular file",
+                path.display()
+            );
         }
         let existing = tokio::fs::read(&path).await?;
         if existing == bytes {
@@ -569,7 +573,10 @@ async fn atomic_write_immutable_deployment(
             let _ = tokio::fs::remove_file(&temporary).await;
             let metadata = tokio::fs::symlink_metadata(&path).await?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
-                bail!("deployment module {} must be a regular file", path.display());
+                bail!(
+                    "deployment module {} must be a regular file",
+                    path.display()
+                );
             }
             let existing = tokio::fs::read(&path).await?;
             if existing == bytes {
