@@ -9,6 +9,19 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flags2env::BundledFlags2Env;
+use lunatic_process::{
+    env::{Environment, LunaticEnvironment},
+    message::{DataMessage, Message},
+    runtimes::{
+        RawWasm,
+        wasmtime::{WasmtimeCompiledModule, WasmtimeRuntime, default_config},
+    },
+    wasm::spawn_wasm,
+    Signal,
+};
+use lunatic_runtime::{DefaultProcessConfig, DefaultProcessState};
+use lunatic_stdout_capture::StdoutCapture;
+use lunatic_wasi_api::LunaticWasiCtx;
 use ores_adapter::OresLambdaAdapterV1;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,7 +37,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::Semaphore, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{RwLock, Semaphore},
+    time::timeout,
+};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -32,6 +49,9 @@ const MAX_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = MAX_MODULE_BYTES * 2;
 const MAX_PARALLELISM: usize = 256;
+const MAX_INVOCATION_BYTES: usize = 10 * 1024 * 1024;
+const MAX_COMPILED_MODULES: usize = 512;
+const ACTOR_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const WASM_HEADER: &[u8; 8] = b"\0asm\x01\0\0\0";
 
 #[allow(non_snake_case)]
@@ -48,19 +68,27 @@ struct CliConfig {
 #[derive(Debug)]
 struct RuntimeConfig {
     addr: SocketAddr,
-    worker_command: String,
-    worker_args: Vec<String>,
     parallelism: usize,
     token_path: PathBuf,
     artifact_root: PathBuf,
     log_filter: String,
 }
 
+type CompiledModule = Arc<WasmtimeCompiledModule<DefaultProcessState>>;
+
+#[derive(Clone)]
+struct LunaticHost {
+    runtime: WasmtimeRuntime,
+    environment: Arc<LunaticEnvironment>,
+    config: Arc<DefaultProcessConfig>,
+    registry: Arc<RwLock<HashMap<String, (u64, u64)>>>,
+    modules: Arc<RwLock<HashMap<String, CompiledModule>>>,
+}
+
 #[derive(Clone)]
 struct AppState {
     token: Arc<str>,
-    worker_command: Arc<str>,
-    worker_args: Arc<Vec<String>>,
+    lunatic: Arc<LunaticHost>,
     artifact_root: Arc<PathBuf>,
     permits: Arc<Semaphore>,
     started_at: Instant,
@@ -132,8 +160,7 @@ async fn main() -> Result<()> {
     validate_real_directory(&config.artifact_root, "artifact root").await?;
     let state = AppState {
         token: Arc::from(token),
-        worker_command: Arc::from(config.worker_command),
-        worker_args: Arc::new(config.worker_args),
+        lunatic: Arc::new(LunaticHost::new()?),
         artifact_root: Arc::new(config.artifact_root),
         permits: Arc::new(Semaphore::new(config.parallelism)),
         started_at: Instant::now(),
@@ -193,15 +220,11 @@ fn load_config() -> Result<RuntimeConfig> {
         .map_err(|error| anyhow!(error.to_string()))?;
 
     let addr = parse_loopback_addr(&raw_config.LL_DESKTOP_ADDR)?;
-    let worker_command = raw_config.LL_RUNTIME_COMMAND.trim().to_owned();
-    if worker_command.is_empty() {
-        bail!("LL_RUNTIME_COMMAND may not be empty");
-    }
-    let worker_args = serde_json::from_str::<Vec<String>>(&raw_config.LL_WORKER_ARGS_JSON)
-        .context("LL_WORKER_ARGS_JSON must be a JSON string array")?;
-    if worker_args.len() > 128 || worker_args.iter().any(|value| value.len() > 16 * 1024) {
-        bail!("worker argument vector exceeds desktop limits");
-    }
+    // Compatibility-only inputs from the old subprocess architecture. They are
+    // deliberately ignored: invocations are always executed by the embedded
+    // Lunatic VM and cannot redirect execution to an arbitrary OS command.
+    let _legacy_runtime_command = raw_config.LL_RUNTIME_COMMAND;
+    let _legacy_worker_args_json = raw_config.LL_WORKER_ARGS_JSON;
 
     let parallelism = usize::try_from(raw_config.LL_MAX_PARALLEL_INVOCATIONS)
         .ok()
@@ -216,8 +239,6 @@ fn load_config() -> Result<RuntimeConfig> {
 
     return Ok(RuntimeConfig {
         addr,
-        worker_command,
-        worker_args,
         parallelism,
         token_path,
         artifact_root: default_artifact_root()?,
@@ -237,7 +258,7 @@ async fn status(
     return Ok(Json(StatusResponse {
         runtime: "lunatic_wasm",
         actor_reusable: false,
-        worker_mode: "fresh_process",
+        worker_mode: "embedded_fresh_lunatic_actor",
         config_source: "flags-2-env",
         deployment_mode: "immutable_wasm_module",
         uptime_ms: state.started_at.elapsed().as_millis(),
@@ -277,6 +298,16 @@ async fn deploy(
         )
     })?;
     validate_wasm_module(&bytes)?;
+    state
+        .lunatic
+        .compile_and_cache(&bytes)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Lunatic module compilation failed: {error}"),
+            )
+        })?;
 
     atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
@@ -349,6 +380,112 @@ async fn invoke(
     return Ok(Json(response));
 }
 
+impl LunaticHost {
+    fn new() -> Result<Self> {
+        let runtime = WasmtimeRuntime::new(&default_config())
+            .context("could not initialize embedded Lunatic Wasmtime runtime")?;
+        let environment = Arc::new(LunaticEnvironment::new(0));
+        let mut config = DefaultProcessConfig::default();
+        use lunatic_process::config::ProcessConfig as _;
+        config.set_max_memory(ACTOR_MAX_MEMORY_BYTES);
+
+        Ok(Self {
+            runtime,
+            environment,
+            config: Arc::new(config),
+            registry: Arc::new(RwLock::new(HashMap::new())),
+            modules: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    async fn compile_and_cache(&self, bytes: &[u8]) -> Result<CompiledModule> {
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        if let Some(module) = self.modules.read().await.get(&digest).cloned() {
+            return Ok(module);
+        }
+
+        let compiled = Arc::new(
+            self.runtime
+                .compile_module::<DefaultProcessState>(RawWasm::from(bytes.to_vec()))
+                .context("Lunatic rejected WebAssembly module")?,
+        );
+
+        let mut modules = self.modules.write().await;
+        if let Some(module) = modules.get(&digest).cloned() {
+            return Ok(module);
+        }
+        if modules.len() >= MAX_COMPILED_MODULES {
+            modules.clear();
+        }
+        modules.insert(digest, compiled.clone());
+        Ok(compiled)
+    }
+
+    async fn invoke(
+        &self,
+        module: CompiledModule,
+        payload: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>> {
+        if payload.len() > MAX_INVOCATION_BYTES {
+            bail!("invocation payload exceeds {MAX_INVOCATION_BYTES} bytes");
+        }
+
+        let mut state = DefaultProcessState::new(
+            self.environment.clone(),
+            None,
+            self.runtime.clone(),
+            module.clone(),
+            self.config.clone(),
+            self.registry.clone(),
+        )
+        .context("could not create fresh Lunatic actor state")?;
+        let stdout = StdoutCapture::new(false);
+        let stderr = StdoutCapture::new(false);
+        state.set_stdout(stdout.clone());
+        state.set_stderr(stderr.clone());
+
+        self.environment
+            .can_spawn_next_process()
+            .await
+            .context("Lunatic environment rejected process spawn")?;
+
+        let (task, process) = spawn_wasm(
+            self.environment.clone(),
+            self.runtime.clone(),
+            &module,
+            state,
+            "_start",
+            Vec::new(),
+            None,
+        )
+        .await
+        .context("could not spawn fresh Lunatic WASM actor")?;
+
+        let message = bincode::serialize(&payload).context("could not encode actor invocation")?;
+        process.send(Signal::Message(Message::Data(DataMessage::new_from_vec(
+            None, message,
+        ))));
+
+        match timeout(deadline, task).await {
+            Ok(joined) => {
+                joined
+                    .context("Lunatic actor task join failed")?
+                    .context("Lunatic actor failed")?;
+            }
+            Err(_) => {
+                process.send(Signal::Kill);
+                bail!("invocation timed out; fresh Lunatic actor was terminated");
+            }
+        }
+
+        if !stderr.is_empty() {
+            tracing::debug!(stderr = %truncate(&stderr.content(), 512), "Lunatic actor stderr");
+        }
+        Ok(stdout.content().into_bytes())
+    }
+}
+
 async fn run_fresh_worker(
     state: &AppState,
     request: &InvocationRequest,
@@ -375,59 +512,22 @@ async fn run_fresh_worker(
             module_path.display()
         );
     }
-    let module_text = module_path
-        .to_str()
-        .ok_or_else(|| anyhow!("deployment module path is not UTF-8"))?;
-    let mut worker_args = Vec::with_capacity(state.worker_args.len() + 1);
-    let mut inserted_module = false;
-    for argument in state.worker_args.iter() {
-        if argument == "{module}" {
-            worker_args.push(module_text.to_owned());
-            inserted_module = true;
-        } else {
-            worker_args.push(argument.clone());
-        }
-    }
-    if !inserted_module {
-        worker_args.push(module_text.to_owned());
-    }
 
-    let mut child = Command::new(state.worker_command.as_ref())
-        .args(worker_args)
-        .env("LL_TENANT_ID", &request.tenant_id)
-        .env("LL_DEPLOYMENT_ID", &request.deployment_id)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| format!("failed to start {}", state.worker_command))?;
+    let module_bytes = tokio::fs::read(&module_path)
+        .await
+        .with_context(|| format!("could not read {}", module_path.display()))?;
+    validate_wasm_module(&module_bytes).map_err(|(_, message)| anyhow!(message))?;
+    let module = state.lunatic.compile_and_cache(&module_bytes).await?;
 
     let payload = serde_json::to_vec(&request.payload_json)?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("worker stdin unavailable"))?;
-    stdin.write_all(&payload).await?;
-    stdin.shutdown().await?;
-    drop(stdin);
-
-    let output = timeout(deadline, child.wait_with_output())
-        .await
-        .map_err(|_| anyhow!("invocation timed out; fresh WASM worker was terminated"))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let summary = stderr
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("worker exited unsuccessfully");
-        bail!("worker failed: {}", truncate(summary, 512));
+    if payload.len() > MAX_INVOCATION_BYTES {
+        bail!("invocation payload exceeds {MAX_INVOCATION_BYTES} bytes");
     }
-
-    let stdout = String::from_utf8(output.stdout).context("worker stdout was not UTF-8")?;
-    let payload_json = serde_json::from_str(stdout.trim()).context("worker stdout was not JSON")?;
-    return Ok(payload_json);
+    let output = state.lunatic.invoke(module, payload, deadline).await?;
+    let stdout = String::from_utf8(output).context("actor stdout was not UTF-8")?;
+    let payload_json =
+        serde_json::from_str(stdout.trim()).context("actor stdout was not JSON")?;
+    Ok(payload_json)
 }
 
 fn validate_wasm_module(bytes: &[u8]) -> Result<(), (StatusCode, String)> {
@@ -739,5 +839,34 @@ mod tests {
     fn truncates_worker_errors() {
         let value = "x".repeat(1024);
         assert_eq!(truncate(&value, 512).len(), 512);
+    }
+
+    #[test]
+    fn subprocess_worker_escape_hatch_is_gone() {
+        let source = include_str!("main.rs");
+        assert!(!source.contains("process::Command"));
+        assert!(!source.contains("Command::new"));
+        assert!(source.contains("spawn_wasm"));
+        assert!(source.contains("embedded_fresh_lunatic_actor"));
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_compiles_minimal_wasm_without_os_process() {
+        let host = LunaticHost::new().expect("embedded runtime");
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (export "_start"))
+            )"#,
+        )
+        .expect("WAT");
+        let first = host
+            .compile_and_cache(&wasm)
+            .await
+            .expect("compile minimal module");
+        let second = host
+            .compile_and_cache(&wasm)
+            .await
+            .expect("reuse compiled module");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
