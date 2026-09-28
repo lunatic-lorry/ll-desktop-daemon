@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::{
     error::Error,
     fs,
@@ -27,12 +29,10 @@ fn unused_loopback() -> Result<SocketAddr, Box<dyn Error>> {
 }
 
 fn start_daemon(root: &PathBuf, address: SocketAddr, token: &str) -> Result<Child, Box<dyn Error>> {
-    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     let token_path = root.join("token");
     fs::write(&token_path, format!("{token}\n"))?;
-    #[cfg(unix)]
     fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))?;
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -83,7 +83,6 @@ fn post_json(
     return Ok(response);
 }
 
-#[cfg(unix)]
 #[test]
 fn deployment_refuses_symlinked_generation_directory() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
@@ -120,7 +119,6 @@ fn deployment_refuses_symlinked_generation_directory() -> Result<(), Box<dyn Err
     return Ok(());
 }
 
-#[cfg(unix)]
 #[test]
 fn deployment_refuses_symlinked_module_file() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
