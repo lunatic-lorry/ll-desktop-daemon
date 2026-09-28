@@ -88,7 +88,7 @@ fn post_json(
 fn deployment_refuses_symlinked_generation_directory() -> Result<(), Box<dyn Error>> {
     use std::os::unix::fs::symlink;
 
-    let root = temp_root("symlink")?;
+    let root = temp_root("symlink-directory")?;
     let tenant_root = root.join(".lunatic-lorry/deployments/tenant-a");
     let outside = root.join("outside");
     fs::create_dir_all(&tenant_root)?;
@@ -114,6 +114,44 @@ fn deployment_refuses_symlinked_generation_directory() -> Result<(), Box<dyn Err
     assert!(
         !outside.join("module.wasm").exists(),
         "deployment escaped the configured artifact root through a symlink"
+    );
+
+    fs::remove_dir_all(root)?;
+    return Ok(());
+}
+
+#[cfg(unix)]
+#[test]
+fn deployment_refuses_symlinked_module_file() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("symlink-module")?;
+    let deployment_root = root.join(".lunatic-lorry/deployments/tenant-a/deploy-a");
+    let outside = root.join("outside-module.wasm");
+    fs::create_dir_all(&deployment_root)?;
+    fs::write(&outside, b"sentinel")?;
+    symlink(&outside, deployment_root.join("module.wasm"))?;
+
+    let address = unused_loopback()?;
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut daemon = start_daemon(&root, address, token)?;
+    wait_until_listening(address)?;
+
+    let body =
+        r#"{"tenant_id":"tenant-a","deployment_id":"deploy-a","wasm_base64":"AGFzbQEAAAA="}"#;
+    let response = post_json(address, token, "/v1/deploy", body)?;
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert!(
+        !response.starts_with("HTTP/1.1 200"),
+        "deployment followed a symlinked module file: {response}"
+    );
+    assert_eq!(
+        fs::read(&outside)?,
+        b"sentinel",
+        "deployment modified the symlink target outside its generation directory"
     );
 
     fs::remove_dir_all(root)?;
