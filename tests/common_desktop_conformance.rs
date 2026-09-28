@@ -1,5 +1,7 @@
 use ores_common_desktop_conformance::assert_router_only_activation;
-use ores_common_desktop_router::{MiddlewareSpec, RouteDestination, RouterGeneration, RouterRoute, RouterState};
+use ores_common_desktop_router::{
+    MiddlewareSpec, RouteDestination, RouterGeneration, RouterRoute, RouterState,
+};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
