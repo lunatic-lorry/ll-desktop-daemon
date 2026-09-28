@@ -9,7 +9,9 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flags2env::BundledFlags2Env;
-use ores_adapter::OresLambdaAdapterV1;
+use ores_adapter::{
+    LL_EXECUTION_BOUNDARY, LL_ISOLATION_MODEL, LL_RUNTIME_CONTRACT, OresLambdaAdapterV1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -94,6 +96,21 @@ struct DeployResponse {
     sha256: String,
     module_bytes: usize,
     ores_adapter_verified: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DeploymentManifest {
+    schema_version: String,
+    tenant_id: String,
+    deployment_id: String,
+    module_sha256: String,
+    module_bytes: u64,
+    runtime_contract: String,
+    execution_boundary: String,
+    isolation_model: String,
+    ores_adapter_verified: bool,
+    ores_adapter_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,7 +282,7 @@ async fn deploy(
     validate_identifier("tenant_id", &request.tenant_id)?;
     validate_identifier("deployment_id", &request.deployment_id)?;
 
-    let ores_adapter_verified = match request.ores_adapter.as_ref() {
+    let (ores_adapter_verified, ores_adapter_sha256) = match request.ores_adapter.as_ref() {
         Some(adapter) => {
             adapter.validate().map_err(|error| {
                 (
@@ -273,9 +290,10 @@ async fn deploy(
                     format!("ORES adapter validation failed: {error}"),
                 )
             })?;
-            true
+            let canonical = serde_json::to_vec(adapter).map_err(internal_error)?;
+            (true, Some(format!("{:x}", Sha256::digest(&canonical))))
         }
-        None => false,
+        None => (false, None),
     };
 
     let bytes = BASE64.decode(request.wasm_base64.as_bytes()).map_err(|_| {
@@ -286,15 +304,28 @@ async fn deploy(
     })?;
     validate_wasm_module(&bytes)?;
 
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let manifest = DeploymentManifest {
+        schema_version: "lunatic-lorry.deployment/v1".to_owned(),
+        tenant_id: request.tenant_id.clone(),
+        deployment_id: request.deployment_id.clone(),
+        module_sha256: sha256.clone(),
+        module_bytes: u64::try_from(bytes.len()).map_err(internal_error)?,
+        runtime_contract: LL_RUNTIME_CONTRACT.to_owned(),
+        execution_boundary: LL_EXECUTION_BOUNDARY.to_owned(),
+        isolation_model: LL_ISOLATION_MODEL.to_owned(),
+        ores_adapter_verified,
+        ores_adapter_sha256,
+    };
     atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
         &request.tenant_id,
         &request.deployment_id,
         &bytes,
+        &manifest,
     )
     .await
     .map_err(internal_error)?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
 
     return Ok(Json(DeployResponse {
         tenant_id: request.tenant_id,
@@ -362,11 +393,10 @@ async fn run_fresh_worker(
     request: &InvocationRequest,
     deadline: Duration,
 ) -> Result<Value> {
-    validate_deployment_directory(
+    let manifest = verify_deployment(
         state.artifact_root.as_ref(),
         &request.tenant_id,
         &request.deployment_id,
-        false,
     )
     .await?;
     let module_path = artifact_path(
@@ -374,6 +404,9 @@ async fn run_fresh_worker(
         &request.tenant_id,
         &request.deployment_id,
     )?;
+    if !manifest.ores_adapter_verified && manifest.ores_adapter_sha256.is_some() {
+        bail!("deployment manifest carries adapter digest without verified adapter");
+    }
     let metadata = tokio::fs::symlink_metadata(&module_path)
         .await
         .with_context(|| format!("deployment module {} is unavailable", module_path.display()))?;
@@ -497,6 +530,12 @@ fn artifact_path(root: &Path, tenant_id: &str, deployment_id: &str) -> Result<Pa
     return Ok(root.join(tenant_id).join(deployment_id).join("module.wasm"));
 }
 
+fn manifest_path(root: &Path, tenant_id: &str, deployment_id: &str) -> Result<PathBuf> {
+    validate_path_component(tenant_id)?;
+    validate_path_component(deployment_id)?;
+    return Ok(root.join(tenant_id).join(deployment_id).join("manifest.json"));
+}
+
 fn validate_path_component(value: &str) -> Result<()> {
     let valid = !value.is_empty()
         && value.len() <= 128
@@ -574,6 +613,7 @@ async fn atomic_write_immutable_deployment(
     tenant_id: &str,
     deployment_id: &str,
     bytes: &[u8],
+    manifest: &DeploymentManifest,
 ) -> Result<()> {
     let deployment = validate_deployment_directory(root, tenant_id, deployment_id, true).await?;
     let path = deployment.join("module.wasm");
@@ -586,7 +626,7 @@ async fn atomic_write_immutable_deployment(
         }
         let existing = tokio::fs::read(&path).await?;
         if existing == bytes {
-            return Ok(());
+            return publish_immutable_manifest(root, tenant_id, deployment_id, manifest).await;
         }
         bail!("deployment id already exists with different module bytes");
     }
@@ -612,7 +652,7 @@ async fn atomic_write_immutable_deployment(
     match tokio::fs::hard_link(&temporary, &path).await {
         Ok(()) => {
             tokio::fs::remove_file(&temporary).await?;
-            return Ok(());
+            return publish_immutable_manifest(root, tenant_id, deployment_id, manifest).await;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = tokio::fs::remove_file(&temporary).await;
@@ -625,7 +665,7 @@ async fn atomic_write_immutable_deployment(
             }
             let existing = tokio::fs::read(&path).await?;
             if existing == bytes {
-                return Ok(());
+                return publish_immutable_manifest(root, tenant_id, deployment_id, manifest).await;
             }
             bail!("deployment id already exists with different module bytes");
         }
@@ -634,6 +674,121 @@ async fn atomic_write_immutable_deployment(
             return Err(error).context("could not atomically publish deployment module");
         }
     }
+}
+
+async fn publish_immutable_manifest(
+    root: &Path,
+    tenant_id: &str,
+    deployment_id: &str,
+    manifest: &DeploymentManifest,
+) -> Result<()> {
+    let deployment = validate_deployment_directory(root, tenant_id, deployment_id, false).await?;
+    let path = manifest_path(root, tenant_id, deployment_id)?;
+    let mut bytes = serde_json::to_vec_pretty(manifest)?;
+    bytes.push(b'\n');
+
+    if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("deployment manifest {} must be a regular file", path.display());
+        }
+        let existing = tokio::fs::read(&path).await?;
+        if existing == bytes {
+            return Ok(());
+        }
+        bail!("deployment id already exists with different manifest evidence");
+    }
+
+    let temporary = deployment.join(format!(".manifest-{}.tmp", Uuid::new_v4().simple()));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await
+        .with_context(|| format!("could not create {}", temporary.display()))?;
+    if let Err(error) = file.write_all(&bytes).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error).context("could not write temporary deployment manifest");
+    }
+    if let Err(error) = file.sync_all().await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error).context("could not sync temporary deployment manifest");
+    }
+    drop(file);
+
+    validate_deployment_directory(root, tenant_id, deployment_id, false).await?;
+    match tokio::fs::hard_link(&temporary, &path).await {
+        Ok(()) => {
+            tokio::fs::remove_file(&temporary).await?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            let metadata = tokio::fs::symlink_metadata(&path).await?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("deployment manifest {} must be a regular file", path.display());
+            }
+            let existing = tokio::fs::read(&path).await?;
+            if existing == bytes {
+                return Ok(());
+            }
+            bail!("deployment id already exists with different manifest evidence");
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error).context("could not atomically publish deployment manifest");
+        }
+    }
+}
+
+async fn verify_deployment(
+    root: &Path,
+    tenant_id: &str,
+    deployment_id: &str,
+) -> Result<DeploymentManifest> {
+    validate_deployment_directory(root, tenant_id, deployment_id, false).await?;
+    let module_path = artifact_path(root, tenant_id, deployment_id)?;
+    let manifest_path = manifest_path(root, tenant_id, deployment_id)?;
+
+    for (path, label) in [
+        (&module_path, "deployment module"),
+        (&manifest_path, "deployment manifest"),
+    ] {
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .with_context(|| format!("{label} {} is unavailable", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("{label} {} must be a regular file", path.display());
+        }
+    }
+
+    let manifest_bytes = tokio::fs::read(&manifest_path).await?;
+    if manifest_bytes.len() > 64 * 1024 {
+        bail!("deployment manifest exceeds 65536 bytes");
+    }
+    let manifest: DeploymentManifest =
+        serde_json::from_slice(&manifest_bytes).context("deployment manifest is invalid")?;
+    if manifest.schema_version != "lunatic-lorry.deployment/v1"
+        || manifest.tenant_id != tenant_id
+        || manifest.deployment_id != deployment_id
+        || manifest.runtime_contract != LL_RUNTIME_CONTRACT
+        || manifest.execution_boundary != LL_EXECUTION_BOUNDARY
+        || manifest.isolation_model != LL_ISOLATION_MODEL
+    {
+        bail!("deployment manifest does not match the Lunatic runtime contract");
+    }
+
+    let module = tokio::fs::read(&module_path).await?;
+    if u64::try_from(module.len())? != manifest.module_bytes {
+        bail!("deployment module size does not match manifest");
+    }
+    let actual = format!("{:x}", Sha256::digest(&module));
+    if actual != manifest.module_sha256 {
+        bail!("deployment module integrity check failed");
+    }
+    if manifest.ores_adapter_verified != manifest.ores_adapter_sha256.is_some() {
+        bail!("deployment manifest adapter evidence is inconsistent");
+    }
+    return Ok(manifest);
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
