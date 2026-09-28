@@ -991,6 +991,89 @@ mod tests {
         assert_eq!(truncate(&value, 512).len(), 512);
     }
 
+    #[tokio::test]
+    async fn deployment_manifest_verifies_and_detects_tampering() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "ll-deployment-integrity-{}",
+            Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir(&root).await?;
+
+        let module = WASM_HEADER.to_vec();
+        let manifest = DeploymentManifest {
+            schema_version: "lunatic-lorry.deployment/v1".to_owned(),
+            tenant_id: "tenant-a".to_owned(),
+            deployment_id: "deploy-a".to_owned(),
+            module_sha256: format!("{:x}", Sha256::digest(&module)),
+            module_bytes: module.len() as u64,
+            runtime_contract: LL_RUNTIME_CONTRACT.to_owned(),
+            execution_boundary: LL_EXECUTION_BOUNDARY.to_owned(),
+            isolation_model: LL_ISOLATION_MODEL.to_owned(),
+            ores_adapter_verified: false,
+            ores_adapter_sha256: None,
+        };
+
+        atomic_write_immutable_deployment(
+            &root,
+            "tenant-a",
+            "deploy-a",
+            &module,
+            &manifest,
+        )
+        .await?;
+        assert_eq!(
+            verify_deployment(&root, "tenant-a", "deploy-a").await?,
+            manifest
+        );
+
+        tokio::fs::write(artifact_path(&root, "tenant-a", "deploy-a")?, b"tampered").await?;
+        assert!(verify_deployment(&root, "tenant-a", "deploy-a").await.is_err());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        return Ok(());
+    }
+
+    #[tokio::test]
+    async fn deployment_manifest_requires_consistent_adapter_evidence() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "ll-adapter-evidence-{}",
+            Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir(&root).await?;
+
+        let module = WASM_HEADER.to_vec();
+        let manifest = DeploymentManifest {
+            schema_version: "lunatic-lorry.deployment/v1".to_owned(),
+            tenant_id: "tenant-a".to_owned(),
+            deployment_id: "deploy-a".to_owned(),
+            module_sha256: format!("{:x}", Sha256::digest(&module)),
+            module_bytes: module.len() as u64,
+            runtime_contract: LL_RUNTIME_CONTRACT.to_owned(),
+            execution_boundary: LL_EXECUTION_BOUNDARY.to_owned(),
+            isolation_model: LL_ISOLATION_MODEL.to_owned(),
+            ores_adapter_verified: false,
+            ores_adapter_sha256: Some("a".repeat(64)),
+        };
+
+        atomic_write_immutable_deployment(
+            &root,
+            "tenant-a",
+            "deploy-a",
+            &module,
+            &manifest,
+        )
+        .await?;
+        assert!(verify_deployment(&root, "tenant-a", "deploy-a").await.is_err());
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        return Ok(());
+    }
+
+    #[test]
+    fn actor_output_limit_matches_invocation_envelope() {
+        assert_eq!(MAX_ACTOR_OUTPUT_BYTES, MAX_INVOCATION_BYTES);
+    }
+
     #[test]
     fn subprocess_worker_escape_hatch_is_gone() {
         let source = include_str!("main.rs");
