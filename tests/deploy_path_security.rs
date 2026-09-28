@@ -100,7 +100,8 @@ fn deployment_refuses_symlinked_generation_directory() -> Result<(), Box<dyn Err
     let mut daemon = start_daemon(&root, address, token)?;
     wait_until_listening(address)?;
 
-    let body = r#"{"tenant_id":"tenant-a","deployment_id":"deploy-a","wasm_base64":"AGFzbQEAAAA="}"#;
+    let body =
+        r#"{"tenant_id":"tenant-a","deployment_id":"deploy-a","wasm_base64":"AGFzbQEAAAA="}"#;
     let response = post_json(address, token, "/v1/deploy", body)?;
 
     let _ = daemon.kill();
