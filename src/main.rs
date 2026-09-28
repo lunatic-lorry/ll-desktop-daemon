@@ -220,9 +220,6 @@ fn load_config() -> Result<RuntimeConfig> {
         .map_err(|error| anyhow!(error.to_string()))?;
 
     let addr = parse_loopback_addr(&raw_config.LL_DESKTOP_ADDR)?;
-    // Compatibility-only inputs from the old subprocess architecture. They are
-    // deliberately ignored: invocations are always executed by the embedded
-    // Lunatic VM and cannot redirect execution to an arbitrary OS command.
     let _legacy_runtime_command = raw_config.LL_RUNTIME_COMMAND;
     let _legacy_worker_args_json = raw_config.LL_WORKER_ARGS_JSON;
 
@@ -418,7 +415,7 @@ impl LunaticHost {
             modules.clear();
         }
         modules.insert(digest, compiled.clone());
-        Ok(compiled)
+        return Ok(compiled);
     }
 
     async fn invoke(
@@ -482,7 +479,7 @@ impl LunaticHost {
         if !stderr.is_empty() {
             tracing::debug!(stderr = %truncate(&stderr.content(), 512), "Lunatic actor stderr");
         }
-        Ok(stdout.content().into_bytes())
+        return Ok(stdout.content().into_bytes());
     }
 }
 
@@ -526,7 +523,7 @@ async fn run_fresh_worker(
     let output = state.lunatic.invoke(module, payload, deadline).await?;
     let stdout = String::from_utf8(output).context("actor stdout was not UTF-8")?;
     let payload_json = serde_json::from_str(stdout.trim()).context("actor stdout was not JSON")?;
-    Ok(payload_json)
+    return Ok(payload_json);
 }
 
 fn validate_wasm_module(bytes: &[u8]) -> Result<(), (StatusCode, String)> {
