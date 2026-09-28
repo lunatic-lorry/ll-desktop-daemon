@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
 
     let token = load_or_create_token(&config.token_path)?;
     tokio::fs::create_dir_all(&config.artifact_root).await?;
+    validate_real_directory(&config.artifact_root, "artifact root").await?;
     let state = AppState {
         token: Arc::from(token),
         worker_command: Arc::from(config.worker_command),
@@ -277,13 +278,14 @@ async fn deploy(
     })?;
     validate_wasm_module(&bytes)?;
 
-    let path = artifact_path(
+    atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
         &request.tenant_id,
         &request.deployment_id,
+        &bytes,
     )
+    .await
     .map_err(internal_error)?;
-    atomic_write(&path, &bytes).await.map_err(internal_error)?;
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
 
     return Ok(Json(DeployResponse {
@@ -352,6 +354,13 @@ async fn run_fresh_worker(
     request: &InvocationRequest,
     deadline: Duration,
 ) -> Result<Value> {
+    validate_deployment_directory(
+        state.artifact_root.as_ref(),
+        &request.tenant_id,
+        &request.deployment_id,
+        false,
+    )
+    .await?;
     let module_path = artifact_path(
         state.artifact_root.as_ref(),
         &request.tenant_id,
@@ -457,24 +466,122 @@ fn validate_path_component(value: &str) -> Result<()> {
     return Ok(());
 }
 
-async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("deployment path has no parent"))?;
-    tokio::fs::create_dir_all(parent).await?;
-    let temporary = parent.join(format!(".module-{}.tmp", Uuid::new_v4().simple()));
-    tokio::fs::write(&temporary, bytes).await?;
-    if tokio::fs::try_exists(path).await? {
-        let existing = tokio::fs::read(path).await?;
+async fn validate_real_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("could not inspect {label} {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("{label} {} must be a real directory", path.display());
+    }
+    return Ok(());
+}
+
+async fn ensure_real_directory(path: &Path, label: &str) -> Result<()> {
+    match tokio::fs::create_dir(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not create {label} {}", path.display()));
+        }
+    }
+    return validate_real_directory(path, label).await;
+}
+
+async fn validate_deployment_directory(
+    root: &Path,
+    tenant_id: &str,
+    deployment_id: &str,
+    create: bool,
+) -> Result<PathBuf> {
+    validate_path_component(tenant_id)?;
+    validate_path_component(deployment_id)?;
+    validate_real_directory(root, "artifact root").await?;
+    let canonical_root = tokio::fs::canonicalize(root)
+        .await
+        .context("could not resolve artifact root")?;
+
+    let tenant = root.join(tenant_id);
+    if create {
+        ensure_real_directory(&tenant, "tenant deployment directory").await?;
+    } else {
+        validate_real_directory(&tenant, "tenant deployment directory").await?;
+    }
+
+    let deployment = tenant.join(deployment_id);
+    if create {
+        ensure_real_directory(&deployment, "deployment generation directory").await?;
+    } else {
+        validate_real_directory(&deployment, "deployment generation directory").await?;
+    }
+
+    let canonical_deployment = tokio::fs::canonicalize(&deployment)
+        .await
+        .context("could not resolve deployment generation directory")?;
+    if !canonical_deployment.starts_with(&canonical_root) {
+        bail!("deployment generation directory escapes artifact root");
+    }
+    return Ok(deployment);
+}
+
+async fn atomic_write_immutable_deployment(
+    root: &Path,
+    tenant_id: &str,
+    deployment_id: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let deployment = validate_deployment_directory(root, tenant_id, deployment_id, true).await?;
+    let path = deployment.join("module.wasm");
+    if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("deployment module {} must be a regular file", path.display());
+        }
+        let existing = tokio::fs::read(&path).await?;
         if existing == bytes {
+            return Ok(());
+        }
+        bail!("deployment id already exists with different module bytes");
+    }
+
+    let temporary = deployment.join(format!(".module-{}.tmp", Uuid::new_v4().simple()));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await
+        .with_context(|| format!("could not create {}", temporary.display()))?;
+    if let Err(error) = file.write_all(bytes).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error).context("could not write temporary deployment module");
+    }
+    if let Err(error) = file.sync_all().await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error).context("could not sync temporary deployment module");
+    }
+    drop(file);
+
+    validate_deployment_directory(root, tenant_id, deployment_id, false).await?;
+    match tokio::fs::hard_link(&temporary, &path).await {
+        Ok(()) => {
             tokio::fs::remove_file(&temporary).await?;
             return Ok(());
         }
-        tokio::fs::remove_file(&temporary).await?;
-        bail!("deployment id already exists with different module bytes");
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            let metadata = tokio::fs::symlink_metadata(&path).await?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("deployment module {} must be a regular file", path.display());
+            }
+            let existing = tokio::fs::read(&path).await?;
+            if existing == bytes {
+                return Ok(());
+            }
+            bail!("deployment id already exists with different module bytes");
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(error).context("could not atomically publish deployment module");
+        }
     }
-    tokio::fs::rename(&temporary, path).await?;
-    return Ok(());
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
