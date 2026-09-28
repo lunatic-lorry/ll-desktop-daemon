@@ -1,4 +1,5 @@
 mod ores_adapter;
+mod ores_receipt;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use axum::{
@@ -25,6 +26,10 @@ use lunatic_wasi_api::LunaticWasiCtx;
 use ores_adapter::{
     LL_EXECUTION_BOUNDARY, LL_ISOLATION_MODEL, LL_RUNTIME_CONTRACT, OresLambdaAdapterV1,
     validate_persisted_provenance,
+};
+use ores_receipt::{
+    MAX_ORES_ADAPTER_BYTES, MAX_ORES_RECEIPT_BYTES, OresBuildEvidence,
+    verify as verify_ores_receipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -109,6 +114,10 @@ struct DeployRequest {
     wasm_base64: String,
     #[serde(default)]
     ores_adapter: Option<OresLambdaAdapterV1>,
+    #[serde(default)]
+    ores_adapter_raw_base64: Option<String>,
+    #[serde(default)]
+    ores_receipt_raw_base64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +127,7 @@ struct DeployResponse {
     sha256: String,
     module_bytes: usize,
     ores_adapter_verified: bool,
+    ores_receipt_verified: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +147,8 @@ struct DeploymentManifest {
     ores_source: Option<String>,
     #[serde(default)]
     ores_source_sha256: Option<String>,
+    #[serde(default)]
+    ores_build_evidence: Option<OresBuildEvidence>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,6 +336,51 @@ async fn deploy(
             "wasm_base64 is not valid base64".to_owned(),
         )
     })?;
+    let ores_build_evidence = match (
+        request.ores_adapter.as_ref(),
+        request.ores_adapter_raw_base64.as_deref(),
+        request.ores_receipt_raw_base64.as_deref(),
+    ) {
+        (_, None, None) => None,
+        (Some(adapter), Some(raw_adapter), Some(raw_receipt)) => {
+            if raw_adapter.len() > MAX_ORES_ADAPTER_BYTES.saturating_mul(2)
+                || raw_receipt.len() > MAX_ORES_RECEIPT_BYTES.saturating_mul(2)
+            {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "ORES receipt evidence exceeds admitted encoded size".to_owned(),
+                ));
+            }
+            let raw_adapter = BASE64.decode(raw_adapter.as_bytes()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "ores_adapter_raw_base64 is not valid base64".to_owned(),
+                )
+            })?;
+            let raw_receipt = BASE64.decode(raw_receipt.as_bytes()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "ores_receipt_raw_base64 is not valid base64".to_owned(),
+                )
+            })?;
+            Some(
+                verify_ores_receipt(adapter, &raw_adapter, &raw_receipt, &bytes).map_err(
+                    |error| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("ORES receipt verification failed: {error}"),
+                        )
+                    },
+                )?,
+            )
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "ORES receipt evidence requires structured adapter, exact raw adapter, and exact raw receipt together".to_owned(),
+            ));
+        }
+    };
     validate_wasm_module(&bytes)?;
     state
         .lunatic
@@ -350,6 +407,7 @@ async fn deploy(
         ores_adapter_sha256,
         ores_source,
         ores_source_sha256,
+        ores_build_evidence,
     };
     atomic_write_immutable_deployment(
         state.artifact_root.as_ref(),
@@ -367,6 +425,7 @@ async fn deploy(
         sha256,
         module_bytes: bytes.len(),
         ores_adapter_verified,
+        ores_receipt_verified: manifest.ores_build_evidence.is_some(),
     }));
 }
 
@@ -821,12 +880,25 @@ fn validate_manifest_ores_provenance(manifest: &DeploymentManifest) -> Result<()
         manifest.ores_source.as_deref(),
         manifest.ores_source_sha256.as_deref(),
     ) {
-        (false, None, None, None) => return Ok(()),
+        (false, None, None, None) => {}
         (true, Some(adapter_sha256), source, source_sha256) => {
-            return validate_persisted_provenance(adapter_sha256, source, source_sha256);
+            validate_persisted_provenance(adapter_sha256, source, source_sha256)?;
         }
         _ => bail!("deployment manifest contains inconsistent ORES provenance evidence"),
     }
+    if let Some(evidence) = manifest.ores_build_evidence.as_ref() {
+        if !manifest.ores_adapter_verified
+            || manifest.ores_source.is_none()
+            || manifest.ores_source_sha256.is_none()
+        {
+            bail!("ORES build evidence requires fully-bound adapter source provenance");
+        }
+        evidence.validate()?;
+        if evidence.artifact_sha256 != manifest.module_sha256 {
+            bail!("ORES build evidence artifact digest does not match deployment module");
+        }
+    }
+    return Ok(());
 }
 
 async fn verify_deployment(
@@ -1051,6 +1123,7 @@ mod tests {
             ores_adapter_sha256: None,
             ores_source: None,
             ores_source_sha256: None,
+            ores_build_evidence: None,
         };
 
         atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
@@ -1086,6 +1159,7 @@ mod tests {
             ores_adapter_sha256: Some("b".repeat(64)),
             ores_source: None,
             ores_source_sha256: None,
+            ores_build_evidence: None,
         };
         validate_manifest_ores_provenance(&manifest)?;
 
@@ -1118,6 +1192,7 @@ mod tests {
             ores_adapter_sha256: Some("a".repeat(64)),
             ores_source: Some("src/routes/echo/lambda.rs".to_owned()),
             ores_source_sha256: Some("b".repeat(64)),
+            ores_build_evidence: None,
         };
 
         atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
