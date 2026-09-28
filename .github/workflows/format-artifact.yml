@@ -1,0 +1,23 @@
+name: format-artifact
+
+on:
+  push:
+    branches:
+      - feat/module-deploy-20260927
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.90.0'
+          components: rustfmt
+      - run: cargo fmt --all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-output
+          path: |
+            src/main.rs
+            src/ores_adapter.rs
