@@ -1060,15 +1060,13 @@ mod tests {
             ores_adapter_sha256: Some("a".repeat(64)),
         };
 
-        atomic_write_immutable_deployment(
-            &root,
-            "tenant-a",
-            "deploy-a",
-            &module,
-            &manifest,
-        )
-        .await?;
-        assert!(verify_deployment(&root, "tenant-a", "deploy-a").await.is_err());
+        atomic_write_immutable_deployment(&root, "tenant-a", "deploy-a", &module, &manifest)
+            .await?;
+        assert!(
+            verify_deployment(&root, "tenant-a", "deploy-a")
+                .await
+                .is_err()
+        );
 
         let _ = tokio::fs::remove_dir_all(&root).await;
         return Ok(());
