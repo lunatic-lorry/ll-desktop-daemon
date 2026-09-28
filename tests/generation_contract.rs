@@ -35,7 +35,11 @@ fn generation_contract_matches_runtime_invariants() -> Result<(), Box<dyn std::e
         .and_then(Value::as_str)
         .ok_or("authority.revision must be a string")?;
     assert_eq!(revision.len(), 40);
-    assert!(revision.chars().all(|character| character.is_ascii_hexdigit()));
+    assert!(
+        revision
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    );
 
     assert_eq!(
         document
