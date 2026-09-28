@@ -18,21 +18,21 @@ env = "LL_RUNTIME_COMMAND"
 aliases = ["runtime"]
 type = "string"
 default = "lunatic"
-help = "Allowlisted Lunatic runtime executable owned by local desired state."
+help = "Deprecated compatibility input. Invocations always use the embedded Lunatic VM; this value is never executed."
 
 [flags.worker-args-json]
 env = "LL_WORKER_ARGS_JSON"
 aliases = ["worker-args-json"]
 type = "string"
 default = "[\"run\",\"ll-lambda.wasm\"]"
-help = "JSON string array of fixed Lunatic worker arguments."
+help = "Deprecated compatibility input retained for config parsing. Embedded actor invocations do not use OS worker argv."
 
 [flags.max-parallel]
 env = "LL_MAX_PARALLEL_INVOCATIONS"
 aliases = ["max-parallel"]
 type = "integer"
 default = 8
-help = "Maximum concurrent one-shot WASM actor processes."
+help = "Maximum concurrent fresh Lunatic WASM actors inside the resident daemon runtime."
 
 [flags.token-file]
 env = "LL_DESKTOP_TOKEN_FILE"
