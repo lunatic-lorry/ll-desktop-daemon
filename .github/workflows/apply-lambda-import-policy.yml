@@ -30,32 +30,23 @@ jobs:
                   raise SystemExit('module insertion anchor not found')
               text = text.replace(old, new, 1)
 
-          old = '''    if bytes.len() > MAX_MODULE_BYTES {
-              return Err((
-                  StatusCode::PAYLOAD_TOO_LARGE,
-                  format!("module exceeds {MAX_MODULE_BYTES} bytes"),
-              ));
-          }
-          return Ok(());
-          '''
-          new = '''    if bytes.len() > MAX_MODULE_BYTES {
-              return Err((
-                  StatusCode::PAYLOAD_TOO_LARGE,
-                  format!("module exceeds {MAX_MODULE_BYTES} bytes"),
-              ));
-          }
-          lambda_import_policy::validate_lunatic_lambda_imports(bytes).map_err(|error| {
+          if 'Lunatic Lambda import admission failed' not in text:
+              start = text.index('fn validate_wasm_module(')
+              end = text.index('\n}\n\nfn artifact_path', start) + 2
+              function = text[start:end]
+              anchor = '    return Ok(());\n}'
+              if anchor not in function:
+                  raise SystemExit('validate_wasm_module return anchor not found')
+              replacement = '''    lambda_import_policy::validate_lunatic_lambda_imports(bytes).map_err(|error| {
               (
                   StatusCode::BAD_REQUEST,
                   format!("Lunatic Lambda import admission failed: {error}"),
               )
           })?;
           return Ok(());
-          '''
-          if 'Lunatic Lambda import admission failed' not in text:
-              if old not in text:
-                  raise SystemExit('validate_wasm_module anchor not found')
-              text = text.replace(old, new, 1)
+          }'''
+              function = function.replace(anchor, replacement, 1)
+              text = text[:start] + function + text[end:]
 
           path.write_text(text)
           PY
